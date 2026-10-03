@@ -36,6 +36,7 @@ Then open **Accounts (ZeroSub)** in the sidebar.
 2. Click **Add account** under Claude or ChatGPT (Codex), then **Open sign-in page**, and sign in with the other account.
    - In a browser on the host's own computer, the page finishes by itself.
    - Anywhere else, choose **Use a code instead**. For Claude, paste the code shown after sign-in. For ChatGPT, type the code shown in Paseo on the page. Phones, and hosts without a desktop (servers, containers, daemons started over SSH), start with the code.
+   - Different members of the same ChatGPT Business/Team workspace count as separate accounts, so you can add each of them. Adding the same member twice is refused.
 3. Choose which account agents use:
    - **Make default**: new agents, and agents that follow the default, use it.
    - **The account button in an agent's message box**: moves that one agent.

@@ -37,6 +37,7 @@ npm run audit:mobile
 | 리셋 제안·소비 응답 파싱 | `server/resets.test.ts` |
 | 사용량 병합·Retry-After | `server/usage.test.ts` |
 | 상태 복구·호환성 | `server/state.test.ts` |
+| 계정 식별 키·로그인 중복/재로그인 검사 | `server/identity.test.ts` |
 | 제공자 간 권한 수준 대응 | `server/modes.test.ts` |
 | 데몬의 브라우저 로그인 가능 여부 | `server/machine.test.ts` |
 | 계정·사용량 표시 형식 | `shared/format.test.ts` |

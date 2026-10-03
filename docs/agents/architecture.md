@@ -23,6 +23,7 @@ RPC·view model·설정·타임라인은 Zod 기반 공유 계약이다. 독립 
 | 계정·로그인·사용량·failover 조정 | [server/service.ts](../../server/service.ts) |
 | 제공자 인터페이스와 환경 적용 | [server/adapter.ts](../../server/adapter.ts) |
 | 공식 CLI 연동 | [server/claude.ts](../../server/claude.ts), [server/codex.ts](../../server/codex.ts) |
+| Codex 계정 식별 키(워크스페이스+멤버)·기존 키 호환 비교 | [server/identity.ts](../../server/identity.ts) |
 | 제공자 profile 식별·별도 인증 제외 | [server/families.ts](../../server/families.ts) |
 | 계정 선택·잔량 순위·binding | [server/routing.ts](../../server/routing.ts) |
 | 한도·로그아웃·리셋 시각 파싱 | [server/limits.ts](../../server/limits.ts) |

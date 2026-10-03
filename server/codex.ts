@@ -12,6 +12,7 @@ import {
 } from "./adapter";
 import { providerCommand } from "./binaries";
 import { codexSqliteHome, prepareCodexHome } from "./homes";
+import { codexIdentityKey } from "./identity";
 import { detectCodexLimit, detectCodexSignOut } from "./limits";
 import { run } from "./process";
 
@@ -250,9 +251,9 @@ export class CodexAdapter implements FamilyAdapter {
           email,
           plan,
           organization: null,
-          // The ChatGPT account (workspace) ID tells a personal plan from a Team workspace on the same
-          // email; without it, fall back to email plus plan so those two still stay distinct.
-          identity: accountId ? `chatgpt|${accountId}` : email ? `chatgpt-email|${email.toLowerCase()}|${plan ?? "unknown"}` : null,
+          // Workspace ID plus member email: a personal plan and a workspace on one email stay apart,
+          // and so do different members of one Business/Team workspace.
+          identity: codexIdentityKey(accountId, email, plan),
         },
         usage,
       };

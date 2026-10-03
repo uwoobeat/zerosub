@@ -20,7 +20,7 @@ export interface Identity {
   email: string | null;
   plan: string | null;
   organization: string | null;
-  /** Stable key for spotting the same account twice (org + email, or the ChatGPT account ID). */
+  /** Stable key for spotting the same account twice (org + email, or ChatGPT workspace + member). */
   identity: string | null;
 }
 

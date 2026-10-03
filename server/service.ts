@@ -33,6 +33,7 @@ import {
 import { FamilyResolver } from "./families";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
+import { identityRelation } from "./identity";
 import { Mutex } from "./json-file";
 import { canSignInWithBrowser } from "./machine";
 import { equivalentMode } from "./modes";
@@ -1580,7 +1581,12 @@ export class Service {
 
     const state = await this.store.read();
     const existing = findAccount(state, session.accountId);
-    if (existing?.kind === "managed" && existing.identity && identity.identity && existing.identity !== identity.identity) {
+    if (
+      existing?.kind === "managed" &&
+      existing.identity &&
+      identity.identity &&
+      identityRelation(existing.identity, existing.email, identity.identity) === "different"
+    ) {
       // Signing an account back in must not quietly turn it into a different login.
       if (session.home) await adapter.logout(session.home).catch(() => undefined);
       const expected = existing.email ?? existing.label;
@@ -1590,10 +1596,15 @@ export class Service {
       );
     }
     // The CLI's own login is whatever the user signs it into; only added accounts must be distinct.
+    // Members of one Business/Team workspace are distinct logins; the same member twice is not.
+    const fresh = identity.identity;
     const duplicate =
-      identity.identity && existing?.kind !== "main"
+      fresh && existing?.kind !== "main"
         ? accountsOf(state, session.family).find(
-            (account) => account.id !== session.accountId && account.identity === identity.identity,
+            (account) =>
+              account.id !== session.accountId &&
+              account.identity !== null &&
+              identityRelation(account.identity, account.email, fresh) === "same",
           )
         : undefined;
     if (duplicate) {
