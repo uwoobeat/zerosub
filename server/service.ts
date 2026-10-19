@@ -41,7 +41,7 @@ import { homesDir } from "./paths";
 import { Reopener } from "./reopen";
 import { SwitchGuard } from "./switch-guard";
 import { loadReadings, mergeUsage, saveReadings, showLimit } from "./usage";
-import { chooseAccount, isLimited, mostAvailable } from "./routing";
+import { chooseAccount, isLimited, isUsable, mostAvailable } from "./routing";
 import {
   MAIN_ACCOUNT_ID,
   StateStore,
@@ -80,11 +80,14 @@ const PRUNE_MS = 10 * 60_000;
 /** After a reset, limit notices from turns that were already running are stale. */
 const RESET_GRACE_MS = 5 * 60_000;
 const AGENT_LIST_MS = 3_000;
+/** How long a default change waits for sessions already being routed to record their account. */
+const ROUTING_WAIT_MS = 5_000;
 
 const DEFAULT_PREFERENCES: Preferences = {
   autoSwitch: true,
   autoContinue: true,
   continuePrompt: DEFAULT_CONTINUE_PROMPT,
+  moveAgentsOnDefaultChange: true,
   balanceNewAgents: false,
   showComposerPill: true,
   autoRedeem: false,
@@ -141,6 +144,8 @@ export class Service {
   private readonly deferred = new Map<string, SwitchRow | null>();
   /** Agents in the middle of a failover, so nothing else moves them at the same time. */
   private readonly switching = new Set<string>();
+  /** Interactive sessions being routed right now, and their agents. Where each opens isn't recorded yet. */
+  private readonly routing = new Map<Promise<unknown>, string>();
   /** One failover at a time per exhausted account. */
   private readonly failoverLocks = new Map<string, Mutex>();
   private readonly switchGuard = new SwitchGuard();
@@ -338,6 +343,20 @@ export class Service {
 
   /** Routes every provider session (create, resume, refresh, import) to the agent's account. */
   async onSessionOpen(
+    request: PluginSessionOpenRequest,
+    context: PluginHookContext,
+  ): Promise<PluginSessionOpenRequest | undefined> {
+    const routed = this.route(request, context);
+    if (request.purpose !== "interactive") return routed;
+    this.routing.set(routed, request.agentId);
+    try {
+      return await routed;
+    } finally {
+      this.routing.delete(routed);
+    }
+  }
+
+  private async route(
     request: PluginSessionOpenRequest,
     context: PluginHookContext,
   ): Promise<PluginSessionOpenRequest | undefined> {
@@ -1304,10 +1323,18 @@ export class Service {
     if (!account) throw new Error("That account no longer exists.");
     if (!account.signedIn) throw new Error(`${account.label} is signed out. Sign it in first.`);
     if (account.disabled) throw new Error(`${account.label} is disabled. Enable it before making it the default.`);
-    if (!this.adapters[account.family].portable) await this.pinThreads(paseo, account.family);
+    const portable = this.adapters[account.family].portable;
+    if (!portable) await this.pinThreads(paseo, account.family);
     await this.store.update((draft) => {
       draft.defaults[account.family] = account.id;
     });
+    if (portable && !this.prefs.moveAgentsOnDefaultChange) {
+      // The new default is for what comes next: open agents stay on the account they run on.
+      const { kept, moving } = await this.keepOpenAgents(paseo, account.family, account.id);
+      console.log(`[ZeroSub] ${account.label} is the default now; ${kept} open agent(s) stay on their account`);
+      // Agents that can't stay where they are move as they would with the switch on; nothing else does.
+      return moving.length > 0 ? this.reconcile(paseo, "default", moving) : emptySummary();
+    }
     // Conversations that can't move (Codex threads) are pinned, so this only moves portable ones.
     return this.reconcile(paseo, "default");
   }
@@ -1365,6 +1392,50 @@ export class Service {
         draft.bindings[agent.id] = { accountId: this.runningOn(draft, agent.id, family) ?? current.id, source: "thread", at };
       }
     });
+  }
+
+  /**
+   * Pins each open agent that follows the default to the account it runs on, so the new default
+   * doesn't move it, now or when it next opens. Runs once the new default is in place, so an agent
+   * that opened under the old one just before is kept too, even if its session was still being
+   * routed. Agents already on the new default keep following it. An account that's gone, signed
+   * out, disabled or at its limit is no place to keep work, so those agents come back in `moving`.
+   */
+  private async keepOpenAgents(
+    paseo: PaseoApi,
+    family: Family,
+    newDefault: string,
+  ): Promise<{ kept: number; moving: string[] }> {
+    // A session being routed may have gone by the old default: let it record where it opens first.
+    if (this.routing.size > 0) await withTimeout(Promise.allSettled(this.routing.keys()), ROUTING_WAIT_MS);
+    const families = await this.families.resolve(paseo);
+    const open = (await listAgents(paseo, false)).agents.filter(
+      (agent) => families[agent.provider] === family && !agent.archived && isLive(agent.status),
+    );
+    let kept = 0;
+    const moving: string[] = [];
+    if (open.length === 0) return { kept, moving };
+    const now = Date.now();
+    const at = new Date(now).toISOString();
+    await this.store.update((draft) => {
+      // Where these open isn't recorded yet, and a session routed now goes by the new default.
+      const routing = new Set(this.routing.values());
+      for (const agent of open) {
+        if (routing.has(agent.id)) continue;
+        // An agent with an account of its own never followed the default.
+        if (findAccount(draft, draft.bindings[agent.id]?.accountId)?.family === family) continue;
+        // Still starting, and not routed yet: it will be, by the new default.
+        if (agent.status === "initializing" && !draft.sessions[agent.id]) continue;
+        const current = findAccount(draft, this.runningOn(draft, agent.id, family));
+        if (!current || current.family !== family || !isUsable(current, now)) moving.push(agent.id);
+        else if (current.id !== newDefault) {
+          // "auto", like a limit switch, so the account button still offers "Follow default".
+          draft.bindings[agent.id] = { accountId: current.id, source: "auto", at };
+          kept += 1;
+        }
+      }
+    });
+    return { kept, moving };
   }
 
   async clearLimit(accountId: string): Promise<void> {

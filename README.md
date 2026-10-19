@@ -38,7 +38,9 @@ Then open **Accounts (ZeroSub)** in the sidebar.
    - Anywhere else, choose **Use a code instead**. For Claude, paste the code shown after sign-in. For ChatGPT, type the code shown in Paseo on the page. Phones, and hosts without a desktop (servers, containers, daemons started over SSH), start with the code.
    - Different members of the same ChatGPT Business/Team workspace count as separate accounts, so you can add each of them. Adding the same member twice is refused.
 3. Choose which account agents use:
-   - **Make default**: new agents, and agents that follow the default, use it.
+   - **Make default**: new agents, and agents that follow the default, use it. Open Claude agents switch right away, busy ones after their turn.
+     - To leave open agents where they are, turn off **Move open agents when the default changes** (in Accounts, or **Settings → Plugins → zerosub → ZeroSub preferences**). Each open agent that follows the default then stays pinned to the account it's using, even after it reopens, unless that account is signed out, disabled or at its limit. New agents, and agents that aren't open at the time, use the new default.
+     - A kept agent still switches when its account hits a limit. To move it to the new default, choose **Follow default** from its account button, or type `/account default`.
    - **The account button in an agent's message box**: moves that one agent.
    - **`/account work`** in the message box, or `/account default` to follow the default again.
    - **⌘K → "Make … the default"**.

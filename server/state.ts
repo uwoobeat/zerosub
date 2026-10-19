@@ -33,7 +33,8 @@ export type StoredAccount = z.infer<typeof StoredAccountSchema>;
 export const BindingSchema = z.object({
   accountId: z.string(),
   /**
-   * `user`: chosen in the UI. `auto`: moved after a limit. `balance`: spread at creation.
+   * `user`: chosen in the UI. `auto`: moved after a limit, or kept on its account when the default
+   * changed. `balance`: spread at creation.
    * `thread`: a conversation that can't change accounts, pinned where it started.
    */
   source: z.enum(["user", "auto", "balance", "thread"]),

@@ -1,13 +1,13 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentTimelineItem, FamilyAdapter, LimitHit, UsageRead } from "./adapter";
 import type { FamilyResolver } from "./families";
 import { detectClaudeLimit } from "./limits";
 import type { Reopener } from "./reopen";
 import { Service } from "./service";
-import { MAIN_ACCOUNT_ID, StateStore, type StoredState } from "./state";
+import { MAIN_ACCOUNT_ID, StateStore, type StoredAccount, type StoredState } from "./state";
 import { preferences } from "../shared/preferences";
 
 const MAIN = MAIN_ACCOUNT_ID.claude;
@@ -393,5 +393,362 @@ describe("disabling an account", () => {
     state = await store.read();
     expect(state.sessions[AGENT]?.accountId).toBe(HELLO);
     expect(reopened).toHaveLength(2);
+  });
+});
+
+describe("changing the default account", () => {
+  const openedAt = "2026-09-23T07:00:00.000Z";
+  const stateWithLiveAgent = () => ({
+    accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
+    defaults: { claude: MAIN, codex: null },
+    bindings: {},
+    sessions: { [AGENT]: { accountId: MAIN, family: "claude" as const, openedAt } },
+  });
+
+  it("moves agents that follow the default", async () => {
+    const { service, store, reopened } = await setUp(stateWithLiveAgent(), () => ({
+      kind: "window",
+      resetsAt: inFuture(),
+      message: "",
+    }));
+    const paseo = fakePaseo().paseo as never;
+
+    const summary = await service.setDefault(paseo, HELLO);
+    expect(summary.reopened).toEqual([AGENT]);
+    expect(reopened).toEqual([AGENT]);
+    expect((await store.read()).defaults.claude).toBe(HELLO);
+  });
+
+  it("leaves running agents where they are when that preference is off", async () => {
+    const { service, store, reopened } = await setUp(stateWithLiveAgent(), () => ({
+      kind: "window",
+      resetsAt: inFuture(),
+      message: "",
+    }));
+    service.setPreferences(preferences.schema.parse({ moveAgentsOnDefaultChange: false }));
+    const paseo = fakePaseo().paseo as never;
+
+    const summary = await service.setDefault(paseo, HELLO);
+    expect(summary.reopened).toEqual([]);
+    expect(reopened).toEqual([]);
+    const state = await store.read();
+    expect(state.defaults.claude).toBe(HELLO); // the default still changed, for new agents
+    expect(state.sessions[AGENT]?.accountId).toBe(MAIN);
+    // Pinned where it runs, so resuming it later doesn't drift to the new default either.
+    expect(state.bindings[AGENT]).toMatchObject({ accountId: MAIN });
+  });
+
+  const WORK = "claude-work";
+  const CODEX_MAIN = MAIN_ACCOUNT_ID.codex;
+  const KEEP = preferences.schema.parse({ moveAgentsOnDefaultChange: false });
+  const NOTHING_MOVED = { reopened: [], deferred: [], failed: [], continuedIn: null };
+  const session = (accountId: string) => ({ accountId, family: "claude" as const, openedAt });
+
+  /** Several agents, each answering for itself. `reopened` lists the ones Paseo was asked to reload. */
+  async function setUpAgents(
+    state: Partial<StoredState>,
+    listed: Array<{ id: string; status: string; provider?: string; archived?: boolean }>,
+    options: { claude?: Partial<FamilyAdapter>; onList?: (service: Service, context: never) => void } = {},
+  ) {
+    const store = new StateStore(join(root, "state.json"));
+    await store.update((draft) => Object.assign(draft, state));
+    const agents = listed.map(({ id, status, provider, archived }) => ({
+      id,
+      provider: provider ?? "claude",
+      status,
+      archivedAt: archived ? "2026-09-23T08:00:00.000Z" : null,
+      lastUserMessageAt: openedAt,
+    }));
+    const paseo = {
+      config: { get: async () => ({ config: { providers: {} } }) },
+      agents: {
+        list: async () => {
+          options.onList?.(service, context);
+          return { entries: agents.map((agent) => ({ agent })), pageInfo: { hasMore: false, nextCursor: null } };
+        },
+        ref: (id: string) => ({
+          refresh: async () => ({ agent: agents.find((agent) => agent.id === id) }),
+          send: async () => undefined,
+          timeline: { append: async () => undefined, refetch: async () => ({ entries: [] }) },
+        }),
+      },
+    };
+    const context = { paseo } as never;
+    const reopened: string[] = [];
+    const hit = (): LimitHit => ({ kind: "window", resetsAt: inFuture(), message: "You've hit your session limit" });
+    const service: Service = new Service(
+      { claude: { ...claudeAdapter(hit), ...options.claude }, codex: { ...claudeAdapter(hit), family: "codex", portable: false } as FamilyAdapter },
+      store,
+      { resolve: async () => ({ claude: "claude" as const, codex: "codex" as const }) } as unknown as FamilyResolver,
+      {
+        locate: async () => "/usr/local/bin/paseo",
+        reopen: async (id: string) => {
+          reopened.push(id);
+          const provider = agents.find((agent) => agent.id === id)?.provider;
+          await service.onSessionOpen({ agentId: id, provider, reason: "refresh", purpose: "interactive", env: {} } as never, context);
+          return { ok: true as const };
+        },
+      } as unknown as Reopener,
+    );
+    service.setPreferences(KEEP);
+    return { service, store, paseo: paseo as never, context, reopened };
+  }
+
+  it("keeps each open agent that follows the default on the account it runs on, and nothing else", async () => {
+    const { service, store, paseo, reopened } = await setUpAgents(
+      {
+        accounts: [account(MAIN, "marketing", "main"), account(WORK, "work", "managed"), account(HELLO, "hello", "managed")] as never,
+        defaults: { claude: WORK, codex: null },
+        bindings: { chosen: { accountId: MAIN, source: "user", at: openedAt } },
+        sessions: {
+          idle: session(WORK),
+          busy: session(WORK),
+          chosen: session(MAIN),
+          closed: session(WORK),
+          there: session(HELLO),
+        },
+      },
+      [
+        { id: "idle", status: "idle" },
+        { id: "busy", status: "running" },
+        { id: "unrouted", status: "idle" }, // opened before ZeroSub routed anything, so on the CLI login
+        { id: "chosen", status: "idle" },
+        { id: "closed", status: "closed" },
+        { id: "there", status: "idle" }, // already on the new default
+        { id: "chatgpt", status: "idle", provider: "codex" }, // a Claude default isn't its concern
+      ],
+    );
+
+    expect(await service.setDefault(paseo, HELLO)).toEqual(NOTHING_MOVED);
+    expect(reopened).toEqual([]);
+    const state = await store.read();
+    expect(state.defaults.claude).toBe(HELLO);
+    const { bindings } = state;
+    expect(bindings.idle).toMatchObject({ accountId: WORK, source: "auto" });
+    expect(bindings.busy).toMatchObject({ accountId: WORK, source: "auto" });
+    expect(bindings.unrouted).toMatchObject({ accountId: MAIN, source: "auto" });
+    expect(bindings.chosen).toMatchObject({ accountId: MAIN, source: "user" });
+    expect(bindings.closed).toBeUndefined();
+    expect(bindings.there).toBeUndefined();
+    expect(bindings.chatgpt).toBeUndefined();
+
+    // Kept agents read as pinned, so their account button offers "Follow default"; the rest follow it.
+    const routes = new Map((await service.view(paseo)).agents.map((route) => [route.agentId, route]));
+    expect(routes.get("idle")).toMatchObject({ accountId: WORK, pinned: true, pendingAccountId: null });
+    expect(routes.get("closed")).toMatchObject({ accountId: HELLO, pinned: false });
+    expect(routes.get("there")).toMatchObject({ accountId: HELLO, pinned: false });
+  });
+
+  it("moves an agent whose account it can't stay on, as it would with the switch on", async () => {
+    const cases: Array<[string, Partial<StoredAccount> | null]> = [
+      ["at its limit", { limitedUntil: inFuture(), limitKind: "window" }],
+      ["signed out", { signedIn: false }],
+      ["disabled", { disabled: true }],
+      ["removed", null],
+    ];
+    for (const [why, work] of cases) {
+      const { service, store, paseo, reopened } = await setUpAgents(
+        {
+          accounts: [
+            account(MAIN, "marketing", "main"),
+            ...(work ? [{ ...account(WORK, "work", "managed"), ...work }] : []),
+            account(HELLO, "hello", "managed"),
+          ] as never,
+          defaults: { claude: MAIN, codex: null },
+          bindings: {},
+          sessions: { stuck: session(WORK), fine: session(MAIN) },
+        },
+        [
+          { id: "stuck", status: "idle" },
+          { id: "fine", status: "idle" },
+        ],
+      );
+      // Without automatic switching, changing the default is how a stuck agent gets out.
+      service.setPreferences({ ...KEEP, autoSwitch: false });
+      expect(await service.setDefault(paseo, HELLO), why).toEqual({ ...NOTHING_MOVED, reopened: ["stuck"] });
+      expect(reopened, why).toEqual(["stuck"]);
+      const state = await store.read();
+      expect(state.sessions.stuck?.accountId, why).toBe(HELLO);
+      expect(state.bindings.stuck, why).toBeUndefined();
+      expect(state.bindings.fine, why).toMatchObject({ accountId: MAIN, source: "auto" });
+    }
+  });
+
+  it("changes nothing when the account is already the default", async () => {
+    const accounts = [account(MAIN, "marketing", "main"), account(WORK, "work", "managed")] as never;
+    const agents = [
+      { id: "idle", status: "idle" },
+      { id: "busy", status: "running" },
+    ];
+    for (const prefs of [KEEP, preferences.schema.parse({})]) {
+      const { service, store, paseo, reopened } = await setUpAgents(
+        { accounts, defaults: { claude: WORK, codex: null }, bindings: {}, sessions: { idle: session(WORK), busy: session(WORK) } },
+        agents,
+      );
+      service.setPreferences(prefs);
+      expect(await service.setDefault(paseo, WORK)).toEqual(NOTHING_MOVED);
+      expect((await store.read()).bindings).toEqual({});
+      expect(reopened).toEqual([]);
+    }
+
+    // Until another account is chosen, the CLI login is the default.
+    const { service, store, paseo, reopened } = await setUpAgents(
+      { accounts, defaults: { claude: null, codex: null }, bindings: {}, sessions: { idle: session(MAIN), busy: session(MAIN) } },
+      agents,
+    );
+    expect(await service.setDefault(paseo, MAIN)).toEqual(NOTHING_MOVED);
+    const state = await store.read();
+    expect(state.defaults.claude).toBe(MAIN);
+    expect(state.bindings).toEqual({});
+    expect(reopened).toEqual([]);
+  });
+
+  it("keeps an agent whose session is still being routed on the account it opens on", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let preparing = false;
+    const { service, store, paseo, context, reopened } = await setUpAgents(
+      {
+        accounts: [account(MAIN, "marketing", "main"), account(WORK, "work", "managed"), account(HELLO, "hello", "managed")] as never,
+        defaults: { claude: WORK, codex: null },
+      },
+      [{ id: "starting", status: "initializing" }],
+      {
+        claude: {
+          prepareHome: async () => {
+            if (preparing) return;
+            preparing = true;
+            await gate;
+          },
+        },
+      },
+    );
+    // Routed by the old default, but it hasn't recorded where it opens yet.
+    const opening = service.onSessionOpen(
+      { agentId: "starting", provider: "claude", reason: "create", purpose: "interactive", env: {} } as never,
+      context,
+    );
+    await vi.waitFor(() => expect(preparing).toBe(true));
+    // A history session opened for the same agent meanwhile mustn't hide the one still being routed.
+    await service.onSessionOpen({ agentId: "starting", provider: "claude", reason: "resume", purpose: "history", env: {} } as never, context);
+    const changing = service.setDefault(paseo, HELLO);
+    await vi.waitFor(async () => expect((await store.read()).defaults.claude).toBe(HELLO));
+    release();
+    const [summary, opened] = await Promise.all([changing, opening]);
+
+    expect(opened?.env).toMatchObject({ CLAUDE_CONFIG_DIR: join(tmpdir(), WORK) });
+    const state = await store.read();
+    expect(state.sessions.starting?.accountId).toBe(WORK);
+    expect(state.bindings.starting).toMatchObject({ accountId: WORK, source: "auto" });
+    expect(summary.reopened).toEqual([]);
+    expect(reopened).toEqual([]);
+  });
+
+  it("leaves agents that are only starting now to the new default", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reloading: Promise<unknown> | undefined;
+    const { service, store, paseo, reopened } = await setUpAgents(
+      {
+        accounts: [account(MAIN, "marketing", "main"), account(WORK, "work", "managed"), account(HELLO, "hello", "managed")] as never,
+        defaults: { claude: WORK, codex: null },
+        bindings: {},
+        sessions: { reloading: session(WORK) },
+      },
+      [
+        { id: "fresh", status: "initializing" }, // listed before Paseo asked ZeroSub where to open it
+        { id: "reloading", status: "idle" },
+      ],
+      {
+        claude: { prepareHome: () => gate },
+        // Paseo reloads this one after the default changed, while the open agents are being listed.
+        onList: (service, context) => {
+          reloading ??= service.onSessionOpen(
+            { agentId: "reloading", provider: "claude", reason: "refresh", purpose: "interactive", env: {} } as never,
+            context,
+          );
+        },
+      },
+    );
+    expect(await service.setDefault(paseo, HELLO)).toEqual(NOTHING_MOVED);
+    release();
+    await reloading;
+    const state = await store.read();
+    expect(state.sessions.reloading?.accountId).toBe(HELLO);
+    expect(state.bindings.reloading).toBeUndefined();
+    expect(state.bindings.fresh).toBeUndefined();
+    expect(reopened).toEqual([]);
+  });
+
+  it("keeps open agents on the CLI login when the first default is chosen", async () => {
+    const { service, store, paseo, reopened } = await setUpAgents(
+      {
+        accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
+        defaults: { claude: null, codex: null },
+        sessions: { routed: session(MAIN) },
+      },
+      [
+        { id: "routed", status: "idle" },
+        { id: "unrouted", status: "running" },
+      ],
+    );
+    await service.setDefault(paseo, HELLO);
+    const state = await store.read();
+    expect(state.defaults.claude).toBe(HELLO);
+    expect(state.bindings.routed).toMatchObject({ accountId: MAIN, source: "auto" });
+    expect(state.bindings.unrouted).toMatchObject({ accountId: MAIN, source: "auto" });
+    expect(reopened).toEqual([]);
+  });
+
+  it("still moves a kept agent when its account hits a limit", async () => {
+    const { service, store, reopened, notes, limitTurn } = await setUp(stateWithLiveAgent(), () => ({
+      kind: "window",
+      resetsAt: inFuture(),
+      message: "You've hit your session limit",
+    }));
+    service.setPreferences(KEEP);
+    await service.setDefault(fakePaseo().paseo as never, HELLO);
+    expect((await store.read()).bindings[AGENT]).toMatchObject({ accountId: MAIN, source: "auto" });
+
+    await limitTurn();
+    const state = await store.read();
+    expect(state.bindings[AGENT]).toMatchObject({ accountId: HELLO, source: "auto" });
+    expect(state.sessions[AGENT]?.accountId).toBe(HELLO);
+    expect(reopened).toEqual([AGENT]);
+    expect(notes.at(-1)).toMatchObject({ from: "marketing", to: "hello", outcome: "switched" });
+  });
+
+  it("moves a kept agent to the new default when asked to follow it", async () => {
+    const { service, store, reopened } = await setUp(stateWithLiveAgent(), () => ({ kind: "window", resetsAt: inFuture(), message: "" }));
+    service.setPreferences(KEEP);
+    const paseo = fakePaseo().paseo as never;
+    await service.setDefault(paseo, HELLO);
+    expect(reopened).toEqual([]);
+
+    await service.setAgentAccount(paseo, AGENT, null); // "Follow default" and `/account default`
+    const state = await store.read();
+    expect(state.bindings[AGENT]).toBeUndefined();
+    expect(state.sessions[AGENT]?.accountId).toBe(HELLO);
+    expect(reopened).toEqual([AGENT]);
+  });
+
+  it("pins ChatGPT threads as before, since they can't move either way", async () => {
+    const codex = (id: string, label: string, kind: "main" | "managed") => ({ ...account(id, label, kind), family: "codex" });
+    const { service, store, paseo, reopened } = await setUpAgents(
+      {
+        accounts: [codex(CODEX_MAIN, "chatgpt", "main"), codex("codex-work", "work", "managed")] as never,
+        defaults: { claude: null, codex: CODEX_MAIN },
+        sessions: { thread: { accountId: CODEX_MAIN, family: "codex", openedAt } },
+      },
+      [
+        { id: "thread", status: "idle", provider: "codex" },
+        { id: "archived", status: "closed", provider: "codex", archived: true },
+      ],
+    );
+    await service.setDefault(paseo, "codex-work");
+    const { bindings } = await store.read();
+    expect(bindings.thread).toMatchObject({ accountId: CODEX_MAIN, source: "thread" });
+    expect(bindings.archived).toMatchObject({ accountId: CODEX_MAIN, source: "thread" });
+    expect(reopened).toEqual([]);
   });
 });
