@@ -9,6 +9,9 @@
   DOM 태그, `className`, `onClick`, `window`, `document`, `localStorage`, `navigator`를 도입하지 않는다.
 - 아이콘·모달·입력·toast에는 기존 `@getpaseo/plugin/client/react-native` 사용 패턴을 따른다.
   버튼·카드·사용량 표시에는 `ui.tsx`를 우선 재사용한다.
+- 클라이언트 번들은 모바일 앱의 Hermes에서 `eval`로 실행되며 class 문법을 지원하지 않는다.
+  `client/`와 클라이언트가 import하는 `shared/`에 `class`를 쓰지 말고 클로저 factory를 사용한다.
+  `client/bundle.test.ts`가 이를 검사한다.
 - 색상은 호스트 `theme` 토큰을 사용하고, `layout.compact`와 좁은 화면을 고려한다.
   접근성 이름, disabled/busy 상태, 터치 조작을 유지한다. hover만으로 기능을 제공하지 않는다.
 - 사용자 문구는 현재 UI의 용어를 따른다. pending 전환, 새 에이전트 continuation,
