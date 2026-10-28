@@ -257,6 +257,7 @@ describe("Antigravity service integration", () => {
     expect(state.sessions[AGENT]?.accountId).toBe(A);
     expect(state.bindings[AGENT]?.accountId).toBe(A);
     expect(reopened).not.toHaveBeenCalled();
+    expect(state.continuations).toEqual({});
   });
 
   it("waits for a busy conversation to finish before a manual continuation", async () => {

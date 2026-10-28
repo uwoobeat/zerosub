@@ -9,10 +9,46 @@ export const CONTINUED_FROM_LABEL = "zerosub.continued-from";
 
 const MAX_TRANSCRIPT = 40_000;
 const MAX_FIRST_MESSAGE = 6_000;
+const MAX_EARLIER_HANDOFF = 6_000;
+
+const OPEN = "<previous-session>";
+const CLOSE = "</previous-session>";
 
 function clip(text: string, max: number): string {
   const trimmed = text.trim();
   return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}…`;
+}
+
+/**
+ * Fits a long text into `max` characters by keeping its start (where the request usually is) and
+ * its end (the most recent context), with a marker where the middle was cut. The end gets more room.
+ */
+export function keepEnds(text: string, max: number, marker = "[… omitted …]"): string {
+  if (text.length <= max) return text;
+  const room = Math.max(0, max - marker.length - 4);
+  const head = Math.floor(room / 3);
+  return `${text.slice(0, head).trimEnd()}\n\n${marker}\n\n${text.slice(text.length - (room - head)).trimStart()}`;
+}
+
+/** Tags become plain words, so a quote can't open or close the block around it. */
+function neutralise(text: string): string {
+  return text.replaceAll(OPEN, "[earlier session:").replaceAll(CLOSE, "]");
+}
+
+/**
+ * A continuation's first message quotes the session before it. Quoting that again would nest every
+ * earlier hand-off inside the next, so keep only the start of the earlier session (its original
+ * request) and its end (where it left off), and say what was cut. Based on liloli's version in #14.
+ */
+export function shortenEarlierHandOff(text: string): string {
+  const open = text.indexOf(OPEN);
+  if (open < 0) return text;
+  const close = text.lastIndexOf(CLOSE);
+  const end = close > open ? close : text.length;
+  const inner = neutralise(shortenEarlierHandOff(text.slice(open + OPEN.length, end))).trim();
+  const kept = keepEnds(inner, MAX_EARLIER_HANDOFF, "[… middle of that earlier session omitted …]");
+  const after = close > open ? text.slice(close + CLOSE.length) : "";
+  return `${neutralise(text.slice(0, open))}${OPEN}\n${kept}\n${CLOSE}${neutralise(after)}`;
 }
 
 function describeTool(item: Extract<AgentTimelineItem, { type: "tool_call" }>): string {
@@ -48,10 +84,13 @@ export function buildTranscript(timeline: readonly AgentTimelineItem[], max = MA
   let todos: string | null = null;
   for (const item of timeline) {
     switch (item.type) {
-      case "user_message":
-        if (firstUser === null) firstUser = clip(item.text, MAX_FIRST_MESSAGE);
-        lines.push(`User: ${item.text.trim()}`);
+      case "user_message": {
+        // Clipping below can't then split a quoted pair: the prompt's own tags are the only ones.
+        const text = neutralise(shortenEarlierHandOff(item.text));
+        if (firstUser === null) firstUser = clip(text, MAX_FIRST_MESSAGE);
+        lines.push(`User: ${text.trim()}`);
         break;
+      }
       case "assistant_message":
         if (item.text.trim()) lines.push(`Assistant: ${item.text.trim()}`);
         break;
@@ -81,9 +120,9 @@ export function continuationPrompt(transcript: string, why: string, previous = "
     `This task is continuing from an earlier ${previous} session that stopped because ${why}.`,
     "The working directory already contains every change that session made. Here is its conversation, oldest first:",
     "",
-    "<previous-session>",
+    OPEN,
     transcript,
-    "</previous-session>",
+    CLOSE,
     "",
     "Pick up exactly where it left off. Check the current state of the files before changing anything, and don't redo finished work.",
   ].join("\n");
@@ -128,6 +167,9 @@ export async function continueInNewAgent(options: {
   target?: ContinuationTarget;
   /** What to call the session that stopped, e.g. `Claude Code`. */
   previous?: string;
+  agentId?: string;
+  /** Create the pre-bound tab first; the caller delivers its handoff separately. */
+  deferPrompt?: boolean;
 }): Promise<Continuation> {
   const { paseo, sourceAgentId } = options;
   const refreshed = await paseo.agents.ref(sourceAgentId).refresh();
@@ -135,7 +177,7 @@ export async function continueInNewAgent(options: {
   if (!source) throw new Error("The original agent is no longer available.");
 
   let timeline = options.timeline;
-  if (!timeline) {
+  if (!timeline && !options.deferPrompt) {
     const page = await paseo.agents.ref(sourceAgentId).timeline.refetch({ direction: "tail", limit: 500 });
     timeline = page.entries.map((entry) => entry.item);
   }
@@ -149,7 +191,7 @@ export async function continueInNewAgent(options: {
     : (source.model ?? source.runtimeInfo?.model ?? (await defaultModel(paseo, provider)));
   if (!model) throw new Error(`Couldn't tell which ${provider} model to use for the new agent.`);
 
-  const agentId = randomUUID();
+  const agentId = options.agentId ?? randomUUID();
   await options.bind(agentId);
   const title = target
     ? `${source.title?.trim() || "Task"} (continued on ${target.label})`
@@ -161,12 +203,14 @@ export async function continueInNewAgent(options: {
         provider: `${provider}/${model}`,
         ...(source.currentModeId ? { modeId: source.currentModeId } : {}),
         ...(source.thinkingOptionId ? { thinkingOptionId: source.thinkingOptionId } : {}),
+        ...(source.features ? { featureValues: Object.fromEntries(source.features.map((feature) => [feature.id, feature.value])) } : {}),
       };
   const request = {
     agentId,
+    ...(options.agentId ? { idempotencyKey: options.agentId } : {}),
     config,
     title,
-    prompt: continuationPrompt(buildTranscript(timeline), options.why, options.previous),
+    ...(!options.deferPrompt ? { prompt: continuationPrompt(buildTranscript(timeline ?? []), options.why, options.previous) } : {}),
     labels: { [CONTINUED_FROM_LABEL]: sourceAgentId },
   };
   if (source.workspaceId) await paseo.workspaces.ref(source.workspaceId).agents.create(request);

@@ -56,7 +56,7 @@ export function describeRow(row: SwitchRow): string {
   switch (row.outcome) {
     case "continued":
       return row.continuedIn
-        ? `${lead}This conversation can't change accounts in place, so it continues in a new agent: “${row.continuedIn.title}” on ${row.to}.`
+        ? `${lead}This conversation can't change accounts in place, so this task continues in “${row.continuedIn.title}” on ${row.to}.`
         : `${lead}Continuing on ${row.to}.`;
     case "stayed":
       return `${lead}This conversation stays on ${row.from ?? "its account"}.${row.detail ? ` ${row.detail}` : ""}`;
@@ -80,9 +80,7 @@ export function SwitchRowView({ item, theme }: PluginTimelineItemProps<SwitchRow
     ? "GitFork"
     : row.reason === "exhausted" || row.outcome === "stayed"
       ? "CircleAlert"
-      : row.outcome === "continued"
-        ? "CopyPlus"
-        : row.outcome === "reset"
+      : row.outcome === "reset"
           ? "TimerReset"
           : "ArrowRightLeft";
   return (

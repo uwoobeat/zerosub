@@ -33,6 +33,7 @@ RPC·view model·설정·타임라인은 Zod 기반 공유 계약이다. 독립 
 | 상태 검증·복구·원자적 파일 쓰기 | [server/state.ts](../../server/state.ts), [server/json-file.ts](../../server/json-file.ts) |
 | 세션 재시작·전환 횟수 제한 | [server/reopen.ts](../../server/reopen.ts), [server/switch-guard.ts](../../server/switch-guard.ts) |
 | 새 대화로 인계·권한 대응 | [server/handoff.ts](../../server/handoff.ts), [server/modes.ts](../../server/modes.ts) |
+| Codex 계정별 작업 탭 재사용·전달 중복 방지 | [server/continuations.ts](../../server/continuations.ts) |
 | CLI 탐색·실행·헤드리스 판별 | `server/binaries.ts`, `server/process.ts`, `server/machine.ts` |
 | 계정 화면·로그인 | `client/accounts-surface.tsx`, `client/add-account.tsx` |
 | 공용 상태 폴링 | [client/store.ts](../../client/store.ts) |
@@ -50,13 +51,17 @@ RPC·view model·설정·타임라인은 Zod 기반 공유 계약이다. 독립 
 
 턴 종료 → adapter의 공식 한도·로그아웃 알림 감지 → 실제 실행 계정 확인 → 계정별 직렬화 →
 사용 가능한 계정 선택 → Claude 재오픈 또는 Codex continuation.
+Paseo 0.13의 빈 hook timeline은 시간 제한 안에서 해당 턴의 행만 다시 읽어 한도를 판단한다.
+Codex continuation은 작업·계정별 탭을 재사용하고 아직 전달되지 않은 대화만 넘긴다.
+Antigravity는 별도 잠금과 기존 continuation 검사를 유지하며 Codex 탭 체인에 등록하지 않는다.
 대체 계정이 없으면 설정·조건에 따라 banked reset, 다른 제공자 fork, 중단 안내로 이어진다.
 라우팅의 목표 계정과 실행 중 세션의 계정은 전환 완료 전까지 다를 수 있다.
 
 ## 데이터와 인증 경계
 
 `PASEO_HOME`의 기본값은 `~/.paseo`다. ZeroSub 데이터는 그 아래 `zerosub/`에 둔다.
-`state.json`은 계정 메타데이터·기본 계정·binding·세션, `usage.json`은 사용량 캐시,
+`state.json`은 계정 메타데이터·기본 계정·binding·세션·Codex continuation 체인의 타임라인 위치,
+`usage.json`은 사용량 캐시,
 `homes/`는 관리 계정의 인증 홈이다. CLI 자신의 로그인은 `kind: "main"`, `home: null`로 표현한다.
 
 Claude 관리 홈에는 `CLAUDE_CONFIG_DIR`와 `CLAUDE_SECURESTORAGE_CONFIG_DIR`를 적용한다.

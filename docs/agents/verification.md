@@ -34,6 +34,8 @@ npm run audit:mobile
 | Antigravity Service 연결·그룹별 제한·continuation | `server/service-antigravity.test.ts` |
 | 모델별 quota 표시·capability 기반 UI | `client/presentation.test.ts`, `shared/format.test.ts` |
 | Service의 전환·실패·재로드 처리 | `server/failover.test.ts` |
+| Codex 작업별 탭 재사용·중복 전달·SDK 연결 | `server/continuations.test.ts`, `server/continuations.sdk.test.ts` |
+| 인계문 축약·이전 세션 중첩 처리 | `server/handoff.test.ts` |
 | 인증 홈·공유 링크·설정 동기화·삭제 | `server/homes.test.ts` |
 | 공식 한도 알림·시간대·로그아웃 감지 | `server/limits.test.ts` |
 | 사용량 파싱·대화 인계문 | `server/parsers.test.ts` |

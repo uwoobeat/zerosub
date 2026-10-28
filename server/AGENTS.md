@@ -50,6 +50,8 @@
 
 Codex의 계정 변경에는 `continueInNewAgent()`를 사용한다. 원본 workspace/cwd와 원본 대화를
 유지하고, 생성 전에 새 계정을 bind한다. 이전 continuation을 재사용하는 중복 방지 경로를 보존한다.
+Codex의 `CodexContinuations`는 작업·계정별 탭과 전달 위치를 저장하고 불명확한 전송을 반복하지
+않는다. Codex 전용 체인 처리를 Antigravity의 continuation에 적용하지 않는다.
 전달문에는 기존 대화·작업 요약만 포함하고 reasoning이나 원시 도구 출력을 추가하지 않는다.
 같은 제공자에서만 model/mode/thinking 설정을 이어받는다. 다른 제공자에서는 대상 기본 모델과
 `equivalentMode()`를 사용한다. 모드가 불명확하거나 안전한 대응 모드가 없으면 fork하지 않는다.

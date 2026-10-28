@@ -112,4 +112,23 @@ describe("scoped limits", () => {
     expect(MAIN_ACCOUNT_ID.antigravity).toBe("antigravity-main");
     expect((await new StateStore(join(dir, "state.json")).read()).defaults.antigravity).toBeNull();
   });
+
+  it("preserves Antigravity group limits alongside Codex continuation chains", async () => {
+    const path = join(dir, "state.json");
+    const store = new StateStore(path);
+    const scopedLimits = [{ scopeId: "gemini", limitedUntil: "2026-10-30T14:00:00Z", limitedAt: "2026-10-29T09:00:00Z", kind: "window" as const }];
+    const chain = { activeAgentId: "codex-agent", members: { "codex-agent": { accountId: MAIN_ACCOUNT_ID.codex, identity: null, email: null, seen: {} } } };
+    await store.update((draft) => {
+      draft.accounts = [
+        StoredAccountSchema.parse({ ...account, id: MAIN_ACCOUNT_ID.codex, family: "codex" }),
+        StoredAccountSchema.parse({ ...account, id: MAIN_ACCOUNT_ID.antigravity, family: "antigravity", scopedLimits }),
+      ];
+      draft.defaults.antigravity = MAIN_ACCOUNT_ID.antigravity;
+      draft.continuations["codex-root"] = chain;
+    });
+    const reloaded = await new StateStore(path).read();
+    expect(reloaded.defaults.antigravity).toBe(MAIN_ACCOUNT_ID.antigravity);
+    expect(reloaded.accounts.find((entry) => entry.family === "antigravity")?.scopedLimits).toEqual(scopedLimits);
+    expect(reloaded.continuations["codex-root"]).toEqual(chain);
+  });
 });
