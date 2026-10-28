@@ -2,9 +2,9 @@ import { useHosts, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin
 import { Icon, Modal, TextInput, useToast } from "@getpaseo/plugin/client/react-native";
 import { SettingsCard, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import { accountSubtitle, formatAge, formatPlan, usageSummary } from "../shared/format";
-import { FAMILY_LABEL, type AccountView, type Family } from "../shared/model";
+import { FAMILY_LABEL, type AccountView, type Family, type StateView } from "../shared/model";
 import { preferences } from "../shared/preferences";
 import {
   clearAccountLimit,
@@ -15,6 +15,22 @@ import {
   type ReopenSummary,
 } from "../shared/rpc";
 import { AddAccountModal } from "./add-account";
+import {
+  canAddAccount,
+  familyAvailable,
+  familyTitle,
+  normalizeAntigravityAutoSwitch,
+  supportsFamily,
+} from "./family-support";
+import {
+  groupMissingNote,
+  groupStatus,
+  groupUsageNote,
+  hasScopedWindows,
+  scopedLimitState,
+  usageGroups,
+  type UsageGroup,
+} from "./quota";
 import { ResetConfirm, redeemToast, resetBadge } from "./reset-confirm";
 import { describe, useStore, VISIBLE_POLL_MS, type ZeroSubStore } from "./store";
 import { Badge, Button, Card, IconButton, UsageBar, useText } from "./ui";
@@ -43,7 +59,9 @@ export function AccountsSurface(props: PluginSurfaceProps & { store: ZeroSubStor
   // Keep usage moving while the screen is open.
   useEffect(() => store.watch(VISIBLE_POLL_MS), [store]);
 
-  const families: Family[] = ["claude", "codex"];
+  const families: Family[] = (["claude", "codex", "antigravity"] as const).filter((family) =>
+    familyAvailable(state, family),
+  );
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       <ScrollView
@@ -74,8 +92,8 @@ export function AccountsSurface(props: PluginSurfaceProps & { store: ZeroSubStor
             ) : null}
           </View>
           <Text style={text.muted}>
-            Keep several Claude and ChatGPT accounts signed in. Each agent uses one; when an account
-            hits its limit, agents move to another and keep going.
+            Keep several subscription accounts signed in. Each agent uses one; when an account hits
+            its limit, agents move to another and keep going.
           </Text>
         </View>
 
@@ -118,13 +136,15 @@ export function AccountsSurface(props: PluginSurfaceProps & { store: ZeroSubStor
                 theme={theme}
                 compact={layout.compact}
                 store={store}
+                canAdd={canAddAccount(state, family)}
+                canReset={supportsFamily(state, family, "resets")}
                 onAdd={() => setAdding({ family })}
                 onSignIn={(account) => setAdding({ family, accountId: account.id })}
               />
             ))
           : null}
 
-        <AutomationSettings theme={theme} />
+        <AutomationSettings theme={theme} state={state} />
       </ScrollView>
 
       {adding ? (
@@ -178,6 +198,8 @@ function FamilySection({
   theme,
   compact,
   store,
+  canAdd,
+  canReset,
   onAdd,
   onSignIn,
 }: {
@@ -186,6 +208,8 @@ function FamilySection({
   theme: Theme;
   compact: boolean;
   store: ZeroSubStore;
+  canAdd: boolean;
+  canReset: boolean;
   onAdd(): void;
   onSignIn(account: AccountView): void;
 }) {
@@ -194,19 +218,26 @@ function FamilySection({
     <View style={{ gap: 10 }}>
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         <Text style={text.heading} accessibilityRole="header">
-          {family === "claude" ? "Claude" : "ChatGPT (Codex)"}
+          {familyTitle(family)}
         </Text>
-        <Button
-          theme={theme}
-          icon="Plus"
-          label={compact ? "Add" : "Add account"}
-          accessibilityLabel={`Add ${FAMILY_LABEL[family]} account`}
-          tooltip={`Sign in another ${FAMILY_LABEL[family]} account`}
-          tooltipAlign="end"
-          onPress={onAdd}
-        />
+        {canAdd ? (
+          <Button
+            theme={theme}
+            icon="Plus"
+            label={compact ? "Add" : "Add account"}
+            accessibilityLabel={`Add ${FAMILY_LABEL[family]} account`}
+            tooltip={`Sign in another ${FAMILY_LABEL[family]} account`}
+            tooltipAlign="end"
+            onPress={onAdd}
+          />
+        ) : null}
       </View>
-      {accounts.length === 0 ? (
+      {!canAdd ? (
+        <Text style={text.small}>
+          This host can show {FAMILY_LABEL[family]} usage, but adding or signing in an account isn't available yet.
+        </Text>
+      ) : null}
+      {accounts.length === 0 && canAdd ? (
         <Text style={text.muted}>No {FAMILY_LABEL[family]} accounts yet.</Text>
       ) : null}
       {chunk(accounts, compact ? 1 : 2).map((row) => (
@@ -217,6 +248,8 @@ function FamilySection({
               account={account}
               theme={theme}
               store={store}
+              canRelogin={canAdd}
+              canReset={canReset}
               onSignIn={() => onSignIn(account)}
             />
           ))}
@@ -231,11 +264,15 @@ function AccountCard({
   account,
   theme,
   store,
+  canRelogin,
+  canReset,
   onSignIn,
 }: {
   account: AccountView;
   theme: Theme;
   store: ZeroSubStore;
+  canRelogin: boolean;
+  canReset: boolean;
   onSignIn(): void;
 }) {
   const text = useText(theme);
@@ -244,7 +281,7 @@ function AccountCard({
   const [renaming, setRenaming] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
-  const resets = account.usage?.resets ?? null;
+  const resets = canReset ? account.usage?.resets ?? null : null;
   const plan = formatPlan(account.plan);
   const summary = usageSummary(account);
   const subtitle = accountSubtitle(account);
@@ -252,8 +289,17 @@ function AccountCard({
   const disabled = account.status === "disabled";
   const faded = disabled ? { opacity: 0.55 } : null;
   const windows = account.usage?.windows ?? [];
+  const scoped = useMemo(() => (hasScopedWindows(windows) ? usageGroups(windows) : []), [windows]);
+  const [focusGroupId, setFocusGroupId] = useState<string | null>(null);
+  const focused = scoped.find((group) => group.id === focusGroupId) ?? scoped[0] ?? null;
+  const usageError = account.usage?.error ?? null;
+  const limitState = scopedLimitState(account);
   const agents = account.agentCount === 0 ? "No agents" : `${account.agentCount} agent${account.agentCount === 1 ? "" : "s"}`;
-  const freshness = !signedOut && account.usage && windows.length > 0 ? `updated ${formatAge(account.usage.fetchedAt)}` : null;
+  const freshness = !signedOut && account.usage
+    ? account.usage.cached
+      ? `cached · last checked ${formatAge(account.usage.fetchedAt)}`
+      : `updated ${formatAge(account.usage.fetchedAt)}`
+    : null;
 
   // Sets the account aside for a while, or brings it back; its agents move off it and back.
   const toggle = useCallback(async () => {
@@ -264,7 +310,7 @@ function AccountCard({
       const message = describeReopen(`${account.label} is ${enabling ? "enabled" : "disabled"}`, result);
       const stayed =
         result.stayed > 0
-          ? ` · ${result.stayed} ChatGPT conversation${result.stayed === 1 ? " stays" : "s stay"} on it (they can't change accounts)`
+          ? ` · ${result.stayed} conversation${result.stayed === 1 ? " stays" : "s stay"} on it (they can't change accounts)`
           : "";
       toast.show(`${message}${stayed}`, { variant: "success", durationMs: 5_000 });
     } catch (error) {
@@ -388,20 +434,46 @@ function AccountCard({
         {disabled ? <Badge theme={theme} label="Disabled" /> : null}
         {plan ? <Badge theme={theme} label={plan} /> : null}
         {account.kind === "main" ? <Badge theme={theme} label="CLI login" /> : null}
-        {account.status === "limited" ? <Badge theme={theme} label="Limit reached" tone="danger" /> : null}
+        {!signedOut && !disabled && account.status === "limited" ? (
+          <Badge theme={theme} label="Limit reached" tone="danger" />
+        ) : null}
+        {!signedOut && !disabled && account.status !== "limited" && limitState === "all" ? (
+          <Badge theme={theme} label="Limit reached" tone="danger" />
+        ) : null}
+        {!signedOut && !disabled && limitState === "some" ? (
+          <Badge theme={theme} label="Some groups at limit" tone="warning" />
+        ) : null}
         {account.status === "signed_out" ? <Badge theme={theme} label="Signed out" tone="warning" /> : null}
+        {!signedOut && account.usage?.cached ? (
+          <Badge theme={theme} label={usageError ? "Cached · refresh failed" : "Cached"} tone="warning" />
+        ) : null}
         {resets && !signedOut ? <Badge theme={theme} label={resetBadge(resets)} tone="accent" /> : null}
       </View>
 
       <View style={[{ gap: 10 }, faded]}>
         {signedOut ? (
           <Text style={text.small}>Sign in again to use this account.</Text>
+        ) : scoped.length > 0 ? (
+          <ScopedUsage
+            theme={theme}
+            usage={account.usage}
+            groups={scoped}
+            focused={focused}
+            onFocus={setFocusGroupId}
+          />
         ) : windows.length > 0 ? (
-          windows.map((limit) => <UsageBar key={limit.id} theme={theme} limit={limit} />)
+          <>
+            {account.usage?.cached ? (
+              <Text style={text.warning}>Cached reading · availability isn't verified.</Text>
+            ) : null}
+            {windows.map((limit) => <UsageBar key={limit.id} theme={theme} limit={limit} />)}
+            {usageError ? <Text style={text.warning}>{usageError}</Text> : null}
+          </>
         ) : (
-          <Text style={text.small}>{account.usage?.error ?? summary ?? "Checking usage…"}</Text>
+          <Text style={text.small}>
+            {usageError ?? summary ?? (account.usage ? "No usage reported — availability unknown." : "Checking usage…")}
+          </Text>
         )}
-        {!signedOut && windows.length > 0 && account.usage?.error ? <Text style={text.small}>{account.usage.error}</Text> : null}
         {!signedOut && resets?.blockedReason ? <Text style={text.small}>{resets.blockedReason}</Text> : null}
       </View>
 
@@ -425,16 +497,20 @@ function AccountCard({
           {disabled ? "Disabled · agents won't use it" : freshness ? `${agents} · ${freshness}` : agents}
         </Text>
         {signedOut ? (
-          <Button
-            theme={theme}
-            size="small"
-            tone="primary"
-            icon="LogIn"
-            label="Sign in"
-            tooltip="Sign this account in again"
-            tooltipAlign="end"
-            onPress={onSignIn}
-          />
+          canRelogin ? (
+            <Button
+              theme={theme}
+              size="small"
+              tone="primary"
+              icon="LogIn"
+              label="Sign in"
+              tooltip="Sign this account in again"
+              tooltipAlign="end"
+              onPress={onSignIn}
+            />
+          ) : (
+            <Text style={[text.small, { flexShrink: 1 }]}>Signing in again isn't available on this host yet.</Text>
+          )
         ) : disabled ? (
           <Button
             theme={theme}
@@ -487,7 +563,9 @@ function AccountCard({
           <Text style={text.body}>
             {account.family === "claude"
               ? "This signs the account out on this machine and deletes its saved login. Agents using it move to the default account; their conversations are kept."
-              : "This signs the account out on this machine and deletes its saved login. New agents use the default account. Existing ChatGPT conversations on it can't move, so start new agents for them."}
+              : account.family === "codex"
+                ? "This signs the account out on this machine and deletes its saved login. New agents use the default account. Existing ChatGPT conversations on it can't move, so start new agents for them."
+                : "This signs the account out on this machine and deletes its saved login. New agents use the default account. Existing Antigravity conversations on it can't move to another account, so start new agents for them."}
           </Text>
           <View style={{ flexDirection: "row", gap: 8, justifyContent: "flex-end" }}>
             <Button theme={theme} label="Cancel" tooltip="Keep this account" tooltipAlign="end" onPress={() => setConfirmRemove(false)} />
@@ -505,6 +583,98 @@ function AccountCard({
         </Modal.Content>
       </Modal>
     </Card>
+  );
+}
+
+function ScopedUsage({
+  theme,
+  usage,
+  groups,
+  focused,
+  onFocus,
+}: {
+  theme: Theme;
+  usage: AccountView["usage"];
+  groups: UsageGroup[];
+  focused: UsageGroup | null;
+  onFocus(id: string): void;
+}) {
+  const text = useText(theme);
+  const note = focused ? groupUsageNote(focused) : null;
+  return (
+    <View style={{ gap: 12 }}>
+      {usage?.cached || usage?.error ? (
+        <Text style={text.warning}>
+          {usage.cached
+            ? usage.error
+              ? `Cached reading · last refresh failed: ${usage.error}`
+              : "Cached reading · availability isn't verified."
+            : `Usage couldn't be read: ${usage.error}`}
+        </Text>
+      ) : null}
+
+      {groups.length > 1 && focused ? (
+        <View style={{ gap: 6 }}>
+          <Text style={text.small}>Compare a model group</Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            {groups.map((group) => {
+              const selected = group.id === focused.id;
+              return (
+                <Pressable
+                  key={group.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Compare ${group.label} usage`}
+                  accessibilityState={{ selected }}
+                  onPress={() => onFocus(group.id)}
+                  style={{
+                    paddingHorizontal: 9,
+                    paddingVertical: 5,
+                    borderRadius: 999,
+                    borderWidth: 1,
+                    borderColor: selected ? theme.colors.accent : theme.colors.border,
+                    backgroundColor: selected ? theme.colors.surface2 : "transparent",
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: selected ? theme.colors.accent : theme.colors.foregroundMuted,
+                      fontSize: 12,
+                      fontWeight: "600",
+                    }}
+                  >
+                    {group.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      ) : null}
+
+      {focused ? (
+        <View style={{ padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2, gap: 2 }}>
+          <Text style={text.strong}>{focused.label}</Text>
+          <Text style={text.small}>
+            {groupStatus(focused, usage)}
+            {note ? ` · ${note}` : ""}
+          </Text>
+        </View>
+      ) : null}
+
+      {groups.map((group) => {
+        const missing = groupMissingNote(group);
+        return (
+          <View
+            key={group.id}
+            style={{ gap: 8, paddingTop: 10, borderTopWidth: 1, borderTopColor: theme.colors.border }}
+          >
+            <Text style={text.strong}>{group.label}</Text>
+            {group.windows.map((limit) => <UsageBar key={limit.id} theme={theme} limit={limit} showMissingReset />)}
+            {missing ? <Text style={text.small}>{missing}</Text> : null}
+          </View>
+        );
+      })}
+    </View>
   );
 }
 
@@ -603,15 +773,19 @@ function Avatar({ theme, label }: { theme: Theme; label: string }) {
   );
 }
 
-function AutomationSettings({ theme }: { theme: Theme }) {
+function AutomationSettings({ theme, state }: { theme: Theme; state: StateView | null }) {
   const settings = useSettings(preferences);
   const text = useText(theme);
   if (settings.status === "loading") return null;
   if (settings.status !== "ready") {
     return <Text style={text.danger}>Preferences unavailable: {settings.error}</Text>;
   }
-  const save = (patch: Partial<typeof settings.values>) =>
-    void settings.save({ ...settings.values, ...patch }, settings.revision);
+  const antigravity = familyAvailable(state, "antigravity");
+  const antigravitySwitch = supportsFamily(state, "antigravity", "autoSwitch");
+  const save = (patch: Partial<typeof settings.values>) => {
+    const next = normalizeAntigravityAutoSwitch({ ...settings.values, ...patch }, antigravitySwitch);
+    void settings.save(next, settings.revision);
+  };
   return (
     <View style={{ gap: 10 }}>
       <Text style={text.heading} accessibilityRole="header">
@@ -620,7 +794,7 @@ function AutomationSettings({ theme }: { theme: Theme }) {
       <SettingsCard>
         <SettingsSwitch
           label="Switch accounts when one hits its limit"
-          hint="Agents move to the account with the most room left."
+          hint="Claude and ChatGPT agents move to the account with the most room left."
           value={settings.values.autoSwitch}
           disabled={settings.saving}
           onValueChange={(autoSwitch) => save({ autoSwitch })}
@@ -632,6 +806,19 @@ function AutomationSettings({ theme }: { theme: Theme }) {
           disabled={settings.saving || !settings.values.autoSwitch}
           onValueChange={(autoContinue) => save({ autoContinue })}
         />
+        {antigravity ? (
+          <SettingsSwitch
+            label="Switch Antigravity accounts automatically"
+            hint={
+              antigravitySwitch
+                ? "Off by default. Antigravity account switching is still being verified, so only turn it on if you want it."
+                : "Off and unavailable on this host until Antigravity account switching is supported and verified."
+            }
+            value={antigravitySwitch ? settings.values.antigravityAutoSwitch : false}
+            disabled={settings.saving || !antigravitySwitch}
+            onValueChange={(antigravityAutoSwitch) => save({ antigravityAutoSwitch })}
+          />
+        ) : null}
         <SettingsSwitch
           label="Spread new agents across accounts"
           hint="New agents start on the account with the most room instead of the default."
@@ -680,4 +867,3 @@ function chunk<T>(items: T[], size: number): T[][] {
   for (let i = 0; i < items.length; i += size) rows.push(items.slice(i, i + size));
   return rows;
 }
-

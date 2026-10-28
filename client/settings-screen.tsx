@@ -9,11 +9,21 @@ import {
 import { useState } from "react";
 import { Text } from "react-native";
 import { DEFAULT_CONTINUE_PROMPT, preferences, type Preferences } from "../shared/preferences";
+import { familyAvailable, normalizeAntigravityAutoSwitch, supportsFamily } from "./family-support";
+import { useStore, type ZeroSubStore } from "./store";
 
 /** Settings → Plugins → zerosub. Accounts themselves live in the sidebar surface. */
-export function PreferencesScreen({ theme, host, onOpenAccounts }: PluginSurfaceProps & { onOpenAccounts(): void }) {
+export function PreferencesScreen({
+  theme,
+  host,
+  store,
+  onOpenAccounts,
+}: PluginSurfaceProps & { store: ZeroSubStore; onOpenAccounts(): void }) {
   const settings = useSettings(preferences);
+  const { state } = useStore(store);
   const multiHost = useHosts().length > 1;
+  const antigravity = familyAvailable(state, "antigravity");
+  const antigravitySwitch = supportsFamily(state, "antigravity", "autoSwitch");
   const [prompt, setPrompt] = useState<string | null>(null);
   const muted = { color: theme.colors.foregroundMuted };
   if (settings.status === "loading") return <Text style={muted}>Loading…</Text>;
@@ -28,8 +38,10 @@ export function PreferencesScreen({ theme, host, onOpenAccounts }: PluginSurface
       </SettingsSection>
     );
   }
-  const save = (patch: Partial<Preferences>) =>
-    void settings.save({ ...settings.values, ...patch }, settings.revision);
+  const save = (patch: Partial<Preferences>) => {
+    const next = normalizeAntigravityAutoSwitch({ ...settings.values, ...patch }, antigravitySwitch);
+    void settings.save(next, settings.revision);
+  };
   return (
     <>
       {multiHost ? (
@@ -55,7 +67,7 @@ export function PreferencesScreen({ theme, host, onOpenAccounts }: PluginSurface
         <SettingsCard>
           <SettingsSwitch
             label="Switch accounts when one hits its limit"
-            hint="The agent moves to the account with the most room left."
+            hint="Claude and ChatGPT agents move to the account with the most room left."
             value={settings.values.autoSwitch}
             disabled={settings.saving}
             onValueChange={(autoSwitch) => save({ autoSwitch })}
@@ -67,6 +79,19 @@ export function PreferencesScreen({ theme, host, onOpenAccounts }: PluginSurface
             disabled={settings.saving || !settings.values.autoSwitch}
             onValueChange={(autoContinue) => save({ autoContinue })}
           />
+          {antigravity ? (
+            <SettingsSwitch
+              label="Switch Antigravity accounts automatically"
+              hint={
+                antigravitySwitch
+                  ? "Off by default. Antigravity account switching is still being verified, so only turn it on if you want it."
+                  : "Off and unavailable on this host until Antigravity account switching is supported and verified."
+              }
+              value={antigravitySwitch ? settings.values.antigravityAutoSwitch : false}
+              disabled={settings.saving || !antigravitySwitch}
+              onValueChange={(antigravityAutoSwitch) => save({ antigravityAutoSwitch })}
+            />
+          ) : null}
           <SettingsInput
             label="Follow-up message"
             initialValue={settings.values.continuePrompt}
@@ -115,7 +140,7 @@ export function PreferencesScreen({ theme, host, onOpenAccounts }: PluginSurface
           />
           <SettingsSwitch
             label="Show the account pill in the composer"
-            hint="Appears on Claude and Codex agents once a provider has two or more accounts."
+            hint="Appears on subscription agents once a provider has two or more accounts."
             value={settings.values.showComposerPill}
             disabled={settings.saving}
             onValueChange={(showComposerPill) => save({ showComposerPill })}

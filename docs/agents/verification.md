@@ -30,6 +30,9 @@ npm run audit:mobile
 | 변경 | 관련 테스트 |
 | --- | --- |
 | 계정 선택·제공자 라우팅 | `server/routing.test.ts` |
+| native Antigravity quota·환경·인증 경계 | `server/antigravity.test.ts`, `server/antigravity-process.test.ts` |
+| Antigravity Service 연결·그룹별 제한·continuation | `server/service-antigravity.test.ts` |
+| 모델별 quota 표시·capability 기반 UI | `client/presentation.test.ts`, `shared/format.test.ts` |
 | Service의 전환·실패·재로드 처리 | `server/failover.test.ts` |
 | 인증 홈·공유 링크·설정 동기화·삭제 | `server/homes.test.ts` |
 | 공식 한도 알림·시간대·로그아웃 감지 | `server/limits.test.ts` |

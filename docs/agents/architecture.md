@@ -22,7 +22,7 @@ RPC·view model·설정·타임라인은 Zod 기반 공유 계약이다. 독립 
 | hook·RPC 등록과 종료 정리 | `index.server.ts`, `index.client.tsx` |
 | 계정·로그인·사용량·failover 조정 | [server/service.ts](../../server/service.ts) |
 | 제공자 인터페이스와 환경 적용 | [server/adapter.ts](../../server/adapter.ts) |
-| 공식 CLI 연동 | [server/claude.ts](../../server/claude.ts), [server/codex.ts](../../server/codex.ts) |
+| 공식 CLI 연동 | [server/claude.ts](../../server/claude.ts), [server/codex.ts](../../server/codex.ts), [server/antigravity.ts](../../server/antigravity.ts) |
 | Codex 계정 식별 키(워크스페이스+멤버)·기존 키 호환 비교 | [server/identity.ts](../../server/identity.ts) |
 | 제공자 profile 식별·별도 인증 제외 | [server/families.ts](../../server/families.ts) |
 | 계정 선택·잔량 순위·binding | [server/routing.ts](../../server/routing.ts) |
@@ -62,6 +62,13 @@ RPC·view model·설정·타임라인은 Zod 기반 공유 계약이다. 독립 
 Claude 관리 홈에는 `CLAUDE_CONFIG_DIR`와 `CLAUDE_SECURESTORAGE_CONFIG_DIR`를 적용한다.
 Codex에는 `CODEX_HOME`과 필요한 `CODEX_SQLITE_HOME`을 적용한다. 환경 상속·config 설정의
 우선순위는 `paths.ts`, adapter의 `env()`, `codexSqliteHome()`을 읽는다.
+Antigravity는 native `agy`만 대상으로 관리 HOME·XDG 경로를 분리하고 Linux에서는 D-Bus 주소를
+비운다. 기존 CLI 홈·설정·히스토리·Keychain을 공유하거나 복사하지 않는다. quota도 동일한
+환경에서 `/usage` JSON으로 읽고, 그룹은 `UsageWindow.scope`와 `StoredAccount.scopedLimits`로
+보존한다. 한 그룹의 소진을 계정 전체 한도로 기록하지 않는다. 정확한 모델 대응이 없는
+그룹은 표시만 하며 자동 선택의 근거로 사용하지 않는다.
+Accounts 화면은 그룹명·공유 사용량·리셋 시각을 표시한다. 모델의 그룹 소속을 확인하지
+못한 내부 상태를 사용량 누락 경고나 개별 모델 잔량처럼 표시하지 않는다.
 공유 여부는 `homes.ts`의 private 정책이 기준이다. 예를 들어 Codex의 `plugins`는 private 목록에
 포함된다. README의 개괄 설명을 “모든 파일을 공유한다”는 구현 규칙으로 해석하지 않는다.
 
@@ -71,6 +78,13 @@ UI 표시 변경은 가능하면 `client/`에 국한한다. 제공자 응답 변
 수정한다. 선택 정책은 `routing.ts`, 전환 조정은 `Service`, 저장 호환성은 `state.ts`에서 다룬다.
 새 구독 제공자 추가는 단일 adapter 작업이 아니다. `Family` 계약, resolver, 상태 기본값,
 Service·UI의 제공자 목록, 로그인 방식, portability, 권한 대응, 패키징과 테스트를 함께 검토한다.
+`FamilyResolver`는 `providers.snapshot()` 카탈로그의 enabled·ready 항목으로 Antigravity를
+확인한다. 모든 제공자를 재검사하는 `listAvailable()`은 다른 CLI의 응답을 기다릴 수 있어
+세션 시작·화면 표시의 확인 경로에 사용하지 않는다. 카탈로그 IPC의 1.5초 제한은 유지한다.
+제공자별 실제 지원 기능은 `FamilyAdapter.capabilities`에서 `StateView.capabilities`로 전달하며
+UI와 Service 양쪽에서 검사한다. Antigravity의 자동 전환·reset·다른 제공자로 fork는 현재
+비활성이고, 계정 간 이력 이동 대신 기존 continuation 경로를 사용한다. 일반 설정이 켜져
+있어도 Antigravity 자동 동작을 활성화하지 않는다.
 
 관련 안전 규칙은 [서버 지침](../../server/AGENTS.md), 검증 방법은
 [검증 절차](verification.md)를 읽는다.

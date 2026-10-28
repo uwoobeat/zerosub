@@ -5,9 +5,11 @@ import type {
   PluginClientContext,
 } from "@getpaseo/plugin/client";
 import { formatPercent, peakUsage, shortLabel } from "../shared/format";
-import { FAMILY_LABEL, type AccountView, type Family, type StateView } from "../shared/model";
+import { FAMILY_LABEL, type AccountView, type StateView } from "../shared/model";
 import { setAgentAccount } from "../shared/rpc";
+import { forkTarget, supportsFamily } from "./family-support";
 import { forkPopover } from "./fork-confirm";
+import { accountUsageNote, hasScopedWindows, modelLimitReached, scopedLimitState } from "./quota";
 import { resetPopover } from "./reset-confirm";
 import type { ZeroSubStore } from "./store";
 
@@ -22,7 +24,7 @@ interface TrackedAgent {
 }
 
 /**
- * One composer pill per Claude/Codex agent showing the account it runs on. Tapping it opens a menu
+ * One composer pill per subscription agent showing the account it runs on. Tapping it opens a menu
  * of that provider's accounts. Pills only appear once a provider has more than one account, so a
  * single-account setup looks exactly like stock Paseo.
  */
@@ -149,20 +151,22 @@ function buttonFor(
   if (!family) return null;
   const accounts = state.accounts.filter((account) => account.family === family);
   const route = state.agents.find((entry) => entry.agentId === agent.id);
+  const model = route?.model;
   const current =
     accounts.find((account) => account.id === route?.accountId) ??
     accounts.find((account) => account.isDefault) ??
     accounts[0];
   if (!current) return null;
   // A banked reset is worth offering right where the agent stopped, even with a single account.
-  const resets = current.usage?.resets ?? null;
+  const resets = supportsFamily(state, family, "resets") ? current.usage?.resets ?? null : null;
   const offerReset = resets !== null && (current.status === "limited" || resets.usableNow);
-  // With every account of this provider out, the work can carry on with the other provider.
-  const other: Family = family === "claude" ? "codex" : "claude";
+  // With every account of this provider out, Claude and ChatGPT can carry the work on across.
+  const forkTo = forkTarget(state, family);
   const offerFork =
+    forkTo !== null &&
     current.status === "limited" &&
     accounts.every((account) => account.status === "limited" || account.status === "signed_out" || account.status === "disabled") &&
-    state.accounts.some((account) => account.family === other && account.status === "ready");
+    state.accounts.some((account) => account.family === forkTo && account.status === "ready");
   if (accounts.length < 2 && !(current.status === "limited" && (offerReset || offerFork))) return null;
 
   const choose = (accountId: string | null) => async () => {
@@ -174,7 +178,7 @@ function buttonFor(
   const items: PluginButtonMenuEntry[] = accounts.map((account, index) => ({
     kind: "item",
     id: `account-${index}`,
-    title: account.id === current.id || movable ? menuTitle(account) : `Continue on ${account.label} (new agent)`,
+    title: account.id === current.id || movable ? menuTitle(account, model) : `Continue on ${account.label} (new agent)`,
     icon: account.id === current.id ? "CircleCheck" : movable ? "Circle" : "CopyPlus",
     disabled: account.status === "signed_out" || account.status === "disabled" || account.id === current.id,
     behavior: { kind: "action", onPress: choose(account.id) },
@@ -192,13 +196,13 @@ function buttonFor(
     if (current.status === "limited") wayOut.push(entry);
     else items.push(entry);
   }
-  if (offerFork) {
+  if (offerFork && forkTo) {
     wayOut.push({
       kind: "item",
       id: "fork-other",
-      title: `Continue on ${FAMILY_LABEL[other]} (new agent)…`,
+      title: `Continue on ${FAMILY_LABEL[forkTo]} (new agent)…`,
       icon: "GitFork",
-      behavior: { kind: "popover", Content: forkPopover(store, agent.id, family, other) },
+      behavior: { kind: "popover", Content: forkPopover(store, agent.id, family, forkTo) },
     });
   }
   if (wayOut.length > 0) items.unshift(...wayOut, { kind: "separator", id: "way-out-divider" });
@@ -227,19 +231,52 @@ function buttonFor(
   });
 
   const pending = route?.pendingAccountId ? " (after this turn)" : "";
+  const baseTitle = `Account: ${current.label}${current.email && current.email !== current.label ? ` (${current.email})` : ""}`;
+  const statusBlocked = current.status === "signed_out" || current.status === "disabled";
   return {
-    title: `Account: ${current.label}${current.email && current.email !== current.label ? ` (${current.email})` : ""}`,
-    icon: current.status === "limited" ? "CircleAlert" : "CircleUserRound",
+    title: family === "antigravity" && !statusBlocked ? `${baseTitle} · ${modelContextNote(current, model)}` : baseTitle,
+    icon:
+      !statusBlocked &&
+      (current.status === "limited" ||
+        scopedLimitState(current) === "all" ||
+        (family === "antigravity" && modelLimitReached(current, model)))
+        ? "CircleAlert"
+        : "CircleUserRound",
     label: `${shortLabel(current)}${pending}`,
     behavior: { kind: "menu", items },
   };
 }
 
-function menuTitle(account: AccountView): string {
+/** Antigravity reports per-model groups, so the pill only names the agent's own model context. */
+function modelContextNote(account: AccountView, model: string | null | undefined): string {
+  const caveat = usageCaveat(account);
+  const note = accountUsageNote(account, model);
+  if (note) return `${note}${caveat}`;
+  return `${model ? "usage not reported for this model" : "usage unknown (model not reported)"}${caveat}`;
+}
+
+/** A reading from cache or after a failed refresh must not read like a live one. */
+function usageCaveat(account: AccountView): string {
+  if (account.usage?.cached) return " · cached";
+  if (account.usage?.error) return " · last check failed";
+  return "";
+}
+
+function menuTitle(account: AccountView, model: string | null | undefined): string {
   if (account.status === "signed_out") return `${account.label} — signed out`;
   if (account.status === "disabled") return `${account.label} — disabled`;
   if (account.status === "limited") return `${account.label} — limit reached`;
-  const peak = account.usage ? peakUsage(account.usage.windows) : null;
+  const limitState = scopedLimitState(account);
+  if (limitState === "all") return `${account.label} — limit reached`;
+  const windows = account.usage?.windows ?? [];
+  if (hasScopedWindows(windows)) {
+    const note = accountUsageNote(account, model);
+    const groups = limitState === "some" ? " · some groups at limit" : "";
+    return note
+      ? `${account.label} — ${note}${usageCaveat(account)}${groups}`
+      : `${account.label}${usageCaveat(account)}${groups}`;
+  }
+  const peak = account.usage ? peakUsage(windows) : null;
   return peak ? `${account.label} — ${formatPercent(peak.usedPercent)} used` : account.label;
 }
 

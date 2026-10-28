@@ -2,8 +2,9 @@ import type { PluginHostProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
-import { formatPercent, formatResetIn } from "../shared/format";
+import { formatPercent } from "../shared/format";
 import type { UsageWindow } from "../shared/model";
+import { resetNote } from "./quota";
 
 type Theme = PluginHostProps["theme"];
 
@@ -256,19 +257,28 @@ export function Badge({
   );
 }
 
-export function UsageBar({ theme, limit }: { theme: Theme; limit: UsageWindow }) {
+export function UsageBar({
+  theme,
+  limit,
+  showMissingReset,
+}: {
+  theme: Theme;
+  limit: UsageWindow;
+  /** Mark a window whose provider didn't report a reset time, instead of leaving it silent. */
+  showMissingReset?: boolean;
+}) {
   const colors = theme.colors;
   const percent = Math.min(100, Math.max(0, limit.usedPercent));
   const fill =
     percent >= 90 ? colors.statusDanger : percent >= 70 ? colors.statusWarning : colors.statusSuccess;
-  const reset = formatResetIn(limit.resetsAt);
+  const reset = resetNote(limit.resetsAt);
   return (
     <View style={{ gap: 4 }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", columnGap: 8 }}>
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{limit.label}</Text>
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
           <Text style={{ color: colors.foreground, fontWeight: "600" }}>{formatPercent(percent)}</Text> used
-          {reset ? ` · resets ${reset}` : ""}
+          {reset ? ` · ${reset}` : showMissingReset ? " · reset time not reported" : ""}
         </Text>
       </View>
       <View

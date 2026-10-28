@@ -1,6 +1,6 @@
 # ZeroSub
 
-Use several Claude and ChatGPT (Codex) subscriptions side by side in [Paseo](https://paseo.sh), without logging in and out of the CLI.
+Use several Claude, ChatGPT (Codex) and native Antigravity subscriptions side by side in [Paseo](https://paseo.sh), without logging in and out of the CLI. Antigravity support is experimental; its current scope is described below.
 
 - **Add accounts in the app.** Click **Add account** under Claude or ChatGPT and sign in on any device, including your phone. You don't need a terminal, environment variables or config files.
 - **Your existing CLI logins show up automatically.** Nothing changes until you add a second account.
@@ -11,7 +11,7 @@ Use several Claude and ChatGPT (Codex) subscriptions side by side in [Paseo](htt
 - **Set an account aside.** Disable an account for a while and its agents move to your other accounts, then come back when you enable it again.
 - **Several hosts.** Each Paseo host keeps its own accounts, and the Accounts screen says which host you're looking at.
 - **Fork to the other provider (optional).** When every Claude account is out, a stopped chat can carry on in a new ChatGPT agent, and the other way round.
-- **Everything else stays the same.** Every account shares your settings, skills, plugins, MCP servers, `CLAUDE.md`/`AGENTS.md` and conversation history.
+- **Shared Claude/Codex configuration.** Added Claude and Codex accounts share your settings, skills, plugins, MCP servers, `CLAUDE.md`/`AGENTS.md` and conversation history.
 
 ## Install
 
@@ -19,6 +19,7 @@ Requirements:
 
 - Paseo 0.9.1 or later, with plugins enabled (**Settings → Plugins → Enable plugins**).
 - The `claude` and/or `codex` CLI installed where the daemon runs, the same ones Paseo already uses.
+- For Antigravity, a host exposing Paseo's native `antigravity` provider and the `agy` CLI. Native credential-file reuse was checked with `agy` 1.4.6 on Linux and macOS, and Paseo 0.12.0. An ACP profile is a different authentication/runtime path and is not managed by this implementation.
 
 In the app, open **Settings → Plugins**, paste `npm:@kapybara/zerosub` as the plugin source, and install. Or, on the daemon host:
 
@@ -65,6 +66,20 @@ Some plans come with banked limit resets: ChatGPT's reset credits, and Claude Co
 - **Claude** uses Claude Code's limit-reset endpoint. Anthropic decides which accounts get resets; so far it reports the tested accounts as not eligible, so the button may not appear for Claude. It shows up by itself once an account has a reset.
 - **Use banked resets when every account is out** (off by default) spends one automatically, but only when every account of that provider is at its limit and the provider confirms the limit at that moment.
 
+### Antigravity (experimental)
+
+The Accounts screen shows Antigravity when the selected host's provider catalog marks a native provider as enabled and ready. ZeroSub reads this catalog without waiting for availability probes of unrelated providers. Its CLI login and added accounts use `agy` directly. Each added account has a private `HOME` and XDG directories; its credentials, settings, MCP logins and conversation files are not copied from another account. Linux also clears the session D-Bus address to use the CLI's file storage. Windows managed accounts are unsupported.
+
+Your existing CLI login can use a symlinked `.gemini` directory. Added accounts keep their authentication paths inside their own home without symlinks; a symlinked credential file is rejected for both kinds of account.
+
+**Linux:** use **Add account**, open the official Google sign-in page and paste its code back into ZeroSub. The official CLI performs the exchange and writes its own credential file. ZeroSub uses the host's `/usr/bin/script` PTY helper for this login flow, with bounded output, cancellation and a deadline. **macOS:** the CLI login's quota can be displayed, but adding or reauthenticating managed accounts is currently disabled. Earlier Mac checks reused a separately prepared file-backed profile; the first login into a new product home still needs a verified Keychain boundary. Existing diagnostic credentials are not imported or copied into the product.
+
+Usage is read with `agy --print /usage --output-format json` in the same account environment, without a model prompt. Gemini, Claude/GPT and Argon quotas appear as separate groups with their reported short and weekly windows. Each group shows its shared usage and reset times. An exhausted group does not block unrelated groups. Cached or failed readings keep their status, and unknown model mappings do not become a numeric estimate in an agent's account button. Refreshes are spaced by at least two minutes per account.
+
+Choose an account for a new agent or make it the default. Moving an existing conversation to another account creates a continuation in the same workspace and preserves the original. A working agent must finish its turn before that operation. If Paseo no longer has the conversation history after a daemon restart, ZeroSub asks you to start a new agent with the task context. Settings and conversation portability between Antigravity accounts have not been verified.
+
+Antigravity automatic failover, quota-based balancing, banked resets and forks to another provider are unavailable in this version. The separate Antigravity automatic-switching preference defaults to off and stays disabled while the adapter cannot verify those operations. Different-account routing, logout isolation and renewal after token expiry still need live verification; the earlier A/B login checks used the same Google account.
+
 ### When every account of a provider is out
 
 ZeroSub tries these in order, and a timeline note says which one happened:
@@ -92,6 +107,7 @@ Paseo installs plugins per host (daemon), so install ZeroSub on each host whose 
 Each added account gets its own credential home under `$PASEO_HOME/zerosub/homes/`:
 
 - Claude uses it as `CLAUDE_CONFIG_DIR`; Codex uses it as `CODEX_HOME`.
+- Antigravity uses a private `HOME` and XDG roots, with its CLI-owned `.gemini/antigravity-cli/antigravity-oauth-token` file. Its home starts empty rather than sharing the other accounts' files.
 - The CLIs keep each home's login separate: Claude in its own keychain entry (`.credentials.json` on Linux), Codex in its own `auth.json`.
 - Everything that isn't account-specific is a symlink back to `~/.claude` or `~/.codex`. For Claude that includes `settings.json`, `skills/`, `plugins/` and `projects/`; for Codex, `config.toml`, `sessions/` and more. Codex also shares its thread database through `CODEX_SQLITE_HOME`.
 - Claude's `.claude.json` holds the account identity, so each account keeps its own copy. It's seeded from yours, and your MCP servers stay in sync.
@@ -109,9 +125,11 @@ ZeroSub never implements OAuth itself and never copies credentials between accou
 
 - Credentials stay in the CLIs' own stores. ZeroSub's registry (`$PASEO_HOME/zerosub/state.json`) holds only account names, emails, plans and which agent uses which account.
 - To show Claude usage, ZeroSub reads each account's current access token and calls Anthropic's usage endpoint, the same way Paseo's built-in usage display and `/usage` do. It never logs or stores tokens and never refreshes them itself. When you refresh usage (the ↻ button beside the title) or use a reset and a token has expired, it runs `claude -p /usage` so Claude Code renews its own sign-in. Codex usage comes from `codex app-server`.
+- Antigravity quota comes from its official CLI; ZeroSub does not call Google's quota API or exchange refresh tokens itself.
 - Using a banked reset calls the provider's own reset endpoint with that account's sign-in, and only after you confirm (or turn on automatic use).
 - Removing an account moves its agents to the default account, then signs it out (`claude auth logout` / `codex` logout) and deletes its home. This happens once no agent is mid-turn on it. Abandoned sign-ins are cleaned up the same way.
 - An account that still has ChatGPT conversations on it can't be removed until you archive them or continue them elsewhere, because they can't move.
+- The same protection applies to Antigravity conversations. Cleanup removes only that managed home's credential file and home; it never calls a global Antigravity logout.
 - Your CLI login can't be removed from ZeroSub.
 
 ## Limitations
@@ -142,7 +160,7 @@ paseo plugin logs zerosub
 Code layout:
 
 - `client/`: React Native UI (Accounts surface, sign-in modal, composer pill, commands, timeline note).
-- `server/`: routing, account homes, Claude and Codex adapters, failover.
+- `server/`: routing, account homes, Claude/Codex/Antigravity adapters, failover.
 - `shared/`: RPC contracts and the view model.
 
 Report problems at [github.com/kapybara-org/ZeroSub/issues](https://github.com/kapybara-org/ZeroSub/issues).

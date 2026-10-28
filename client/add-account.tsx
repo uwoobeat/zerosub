@@ -5,6 +5,7 @@ import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { formatPlan } from "../shared/format";
 import { FAMILY_LABEL, type Family, type LoginMethod, type LoginView } from "../shared/model";
 import { cancelLogin, startLogin, submitLoginCode } from "../shared/rpc";
+import { loginMethodsFor } from "./family-support";
 import { describe, useStore, type ZeroSubStore } from "./store";
 import { Button, useText } from "./ui";
 
@@ -37,7 +38,10 @@ export function AddAccountModal({
   // Phones start with a code; the browser stays on offer for someone at the host's computer.
   const mobile = layout.platform === "ios" || layout.platform === "android";
   const hostBrowser = state?.browserSignIn !== false;
-  const [method, setMethod] = useState<LoginMethod>(hostBrowser && !mobile ? "browser" : "code");
+  const methods = loginMethodsFor(state, family);
+  const initialMethod: LoginMethod =
+    hostBrowser && !mobile && methods.includes("browser") ? "browser" : methods.includes("code") ? "code" : methods[0] ?? "code";
+  const [method, setMethod] = useState<LoginMethod>(initialMethod);
   const [loginId, setLoginId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   // Each start gets a number; only the newest one's answer counts.
@@ -65,8 +69,11 @@ export function AddAccountModal({
   );
 
   useEffect(() => {
-    if (attempt.current === 0) void begin(method);
-  }, [begin, method]);
+    if (methods.length === 0 || attempt.current !== 0) return;
+    const next = methods.includes(method) ? method : initialMethod;
+    if (next !== method) setMethod(next);
+    void begin(next);
+  }, [begin, method, methods, initialMethod]);
 
   useEffect(() => store.watchClosely(), [store]);
 
@@ -91,7 +98,18 @@ export function AddAccountModal({
 
   const title = accountId ? "Sign in again" : `Add ${FAMILY_LABEL[family]} account`;
   let body: ReactNode;
-  if (startError) {
+  if (methods.length === 0) {
+    body = (
+      <>
+        <Text style={text.danger}>
+          Signing in {FAMILY_LABEL[family]} isn't available on this host.
+        </Text>
+        <Row>
+          <Button theme={theme} label="Close" tooltip="Close this window" tooltipAlign="end" onPress={close} />
+        </Row>
+      </>
+    );
+  } else if (startError) {
     body = (
       <>
         <Text style={text.danger}>{startError}</Text>
@@ -119,6 +137,7 @@ export function AddAccountModal({
         login={login}
         family={family}
         method={method}
+        methods={methods}
         browserUsable={hostBrowser}
         onSwitch={switchMethod}
       />
@@ -136,7 +155,7 @@ export function AddAccountModal({
         <Text style={text.heading}>You're signed in</Text>
         <Text style={text.body}>
           {who} is ready. New {FAMILY_LABEL[family]} agents{multiHost ? ` on ${host.label}` : ""} can use it, and you can
-          move an agent to it from the account button in the message box.
+          choose it from the account button in the message box.
         </Text>
         <Row>
           <Button theme={theme} tone="primary" label="Done" tooltip="Close this window" tooltipAlign="end" onPress={onClose} />
@@ -183,6 +202,7 @@ function SignInSteps({
   login,
   family,
   method,
+  methods,
   browserUsable,
   onSwitch,
 }: {
@@ -191,6 +211,8 @@ function SignInSteps({
   login: LoginView;
   family: Family;
   method: LoginMethod;
+  /** Sign-in routes this host offered when the modal opened. */
+  methods: LoginMethod[];
   /** A browser on the host's computer can finish the sign-in, so offer that route too. */
   browserUsable: boolean;
   onSwitch(method: LoginMethod): void;
@@ -202,7 +224,8 @@ function SignInSteps({
   const [codeError, setCodeError] = useState<string | null>(null);
 
   // Claude: the browser link completes by itself; the code link works from any device.
-  const pasteFlow = family === "claude" && (method === "code" || !login.url) && Boolean(login.codeUrl);
+  // Antigravity's code sign-in uses the same URL/code fields; no token is shown here.
+  const pasteFlow = family !== "codex" && (method === "code" || !login.url) && Boolean(login.codeUrl);
   const link = pasteFlow ? login.codeUrl : login.url ?? login.codeUrl;
 
   const open = useCallback(() => {
@@ -247,8 +270,12 @@ function SignInSteps({
     [theme],
   );
 
-  const service = family === "claude" ? "Claude" : "ChatGPT";
-  const canSwitch = browserUsable && (family === "codex" || (Boolean(login.url) && Boolean(login.codeUrl)));
+  const service = FAMILY_LABEL[family];
+  const canSwitch =
+    methods.includes("browser") &&
+    methods.includes("code") &&
+    browserUsable &&
+    (family === "codex" || (Boolean(login.url) && Boolean(login.codeUrl)));
   return (
     <View style={{ gap: 16 }}>
       <Step theme={theme} number={1} title={`Open the ${service} sign-in page`}>
