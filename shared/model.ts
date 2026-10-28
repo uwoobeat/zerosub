@@ -1,13 +1,32 @@
 import { z } from "zod";
 
-/** The two subscription families this plugin manages. Custom provider profiles map onto one of them. */
-export const FamilySchema = z.enum(["claude", "codex"]);
+/** The subscription families this plugin manages. Custom provider profiles map onto one of them. */
+export const FamilySchema = z.enum(["claude", "codex", "antigravity"]);
 export type Family = z.infer<typeof FamilySchema>;
 
 export const FAMILY_LABEL: Record<Family, string> = {
   claude: "Claude",
   codex: "ChatGPT",
+  antigravity: "Antigravity",
 };
+
+/**
+ * A group of models a provider limits together. Providers such as Antigravity report a shared
+ * window for several model groups plus separate windows for individual groups, so a window alone
+ * doesn't say which model it applies to.
+ */
+export const UsageScopeSchema = z.object({
+  /** Stable provider key for the group, e.g. a bucket's group id. */
+  id: z.string(),
+  /** The provider's own name for the group. */
+  label: z.string(),
+  /**
+   * Exact CLI model IDs this group covers. Empty means the provider didn't say (automatic
+   * matching is unknown); it never means "every model".
+   */
+  models: z.array(z.string()),
+});
+export type UsageScope = z.infer<typeof UsageScopeSchema>;
 
 export const UsageWindowSchema = z.object({
   /** Stable key, e.g. `five_hour`, `seven_day`, `seven_day_opus`, `primary`, `secondary`. */
@@ -16,6 +35,13 @@ export const UsageWindowSchema = z.object({
   /** 0–100. */
   usedPercent: z.number(),
   resetsAt: z.string().nullable(),
+  /**
+   * Which models this window covers, when the provider reports model-specific limits. Absent for
+   * the account-wide windows Claude and Codex report.
+   */
+  scope: UsageScopeSchema.optional(),
+  /** The provider's own period name, e.g. `5h` or `weekly`. */
+  period: z.string().optional(),
 });
 export type UsageWindow = z.infer<typeof UsageWindowSchema>;
 
@@ -82,6 +108,8 @@ export const AgentRouteSchema = z.object({
   family: FamilySchema,
   /** Account the agent uses now, or will use when its session next opens. */
   accountId: z.string(),
+  /** Current model of the agent, when Paseo reports it, so usage can be scoped to it. */
+  model: z.string().nullable().optional(),
   /** Chosen for this agent explicitly (by the user or an automatic switch) rather than following the default. */
   pinned: z.boolean(),
   /** The live session still runs on a different account and is waiting to be reopened. */
@@ -114,6 +142,24 @@ export const LoginMethodSchema = z.enum([
 ]);
 export type LoginMethod = z.infer<typeof LoginMethodSchema>;
 
+/**
+ * What ZeroSub can actually do for a family here. A family being in `FamilySchema` doesn't mean
+ * every account, login or failover path is implemented for it yet.
+ */
+export const FamilyCapabilitiesSchema = z.object({
+  /** Isolated credential homes can be created and routed per account. */
+  managedAccounts: z.boolean(),
+  /** Sign-in flows this deployment can complete. */
+  loginMethods: z.array(LoginMethodSchema),
+  /** Accounts can move automatically when a limit is reached. */
+  autoSwitch: z.boolean(),
+  /** Banked resets can be listed or spent. */
+  resets: z.boolean(),
+  /** Work can be handed to this family from another provider. */
+  fork: z.boolean(),
+});
+export type FamilyCapabilities = z.infer<typeof FamilyCapabilitiesSchema>;
+
 export const LoginViewSchema = z.object({
   id: z.string(),
   family: FamilySchema,
@@ -138,6 +184,11 @@ export const StateViewSchema = z.object({
   logins: z.array(LoginViewSchema),
   /** Paseo provider IDs (including custom profiles) that route through each family. */
   providers: z.record(z.string(), FamilySchema),
+  /**
+   * What this deployment can do for each family, keyed by family id. Missing families use their
+   * safe defaults rather than assuming every account feature works.
+   */
+  capabilities: z.record(z.string(), FamilyCapabilitiesSchema).default({}),
   /** Live sessions can be reopened on another account without waiting for the next session start. */
   canReopen: z.boolean(),
   /**

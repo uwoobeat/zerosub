@@ -35,3 +35,17 @@ export function mainCodexHome(): string {
   const configured = process.env.CODEX_HOME?.trim();
   return configured ? resolve(configured) : join(homedir(), ".codex");
 }
+
+/**
+ * The Antigravity CLI's own login lives under the operating system's real HOME. Its documented
+ * account selector has no separate config-home variable, so `GEMINI_HOME` (used by the ACP runtime)
+ * must not be treated as one here.
+ */
+export function mainAntigravityHome(): string {
+  return homedir();
+}
+
+/** The CLI-owned credential file for `home`, or for the OS login when `home` is null. */
+export function antigravityCredentialPath(home: string | null): string {
+  return join(home ?? mainAntigravityHome(), ".gemini", "antigravity-cli", "antigravity-oauth-token");
+}

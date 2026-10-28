@@ -1,5 +1,5 @@
 import type { PluginLifecycleEvents, PluginTurnOutcome } from "@getpaseo/plugin/server";
-import type { Family, LoginMethod, LoginStep, Usage } from "../shared/model";
+import type { Family, FamilyCapabilities, LoginMethod, LoginStep, Usage } from "../shared/model";
 import type { RedeemOutcome } from "../shared/rpc";
 
 /**
@@ -37,6 +37,8 @@ export interface LimitHit {
   kind: LimitKind;
   /** When the limit lifts, if the provider said. */
   resetsAt: string | null;
+  /** Usage scope the provider says this limit belongs to, when it names one. */
+  scopeId?: string;
   message: string;
 }
 
@@ -76,6 +78,11 @@ export type EnvPatch = Record<string, string | null>;
 /** Everything provider-specific. The service only talks to accounts through this. */
 export interface FamilyAdapter {
   readonly family: Family;
+  /**
+   * What this adapter can do here. Optional so existing adapters, fakes and older third-party
+   * implementations keep compiling; absent means "assume the pre-Antigravity behaviour".
+   */
+  readonly capabilities?: FamilyCapabilities;
   /** A live conversation can reopen on another account of this provider. */
   readonly portable: boolean;
   /** Shortest gap between usage checks for one account, even when a refresh is forced. */

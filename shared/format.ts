@@ -1,4 +1,4 @@
-import type { AccountView, UsageWindow } from "./model";
+import type { AccountView, Usage, UsageWindow } from "./model";
 
 /** "in 2h 14m", "in 3d 4h", "now". */
 export function formatResetIn(resetsAt: string | null, now: number = Date.now()): string | null {
@@ -29,6 +29,74 @@ export function peakUsage(windows: readonly UsageWindow[]): UsageWindow | null {
     if (!peak || limit.usedPercent > peak.usedPercent) peak = limit;
   }
   return peak;
+}
+
+/**
+ * Whether a usage window governs `model`. Account-wide windows (no `scope`) apply to every model.
+ * A scoped window applies only when its exact CLI model ID is listed: an unknown model matches no
+ * scoped window, and an empty `scope.models` list means the mapping is unknown rather than "all".
+ */
+export function usageWindowAppliesToModel(window: UsageWindow, model: string | null | undefined): boolean {
+  if (!window.scope) return true;
+  if (!model) return false;
+  return window.scope.models.includes(model);
+}
+
+/** The windows that govern `model`, for per-model headroom and labels. */
+export function usageWindowsForModel(
+  windows: readonly UsageWindow[],
+  model: string | null | undefined,
+): UsageWindow[] {
+  return windows.filter((window) => usageWindowAppliesToModel(window, model));
+}
+
+/** The busiest window that governs `model`, or null when nothing is known for it. */
+export function peakUsageForModel(
+  windows: readonly UsageWindow[],
+  model: string | null | undefined,
+): UsageWindow | null {
+  return peakUsage(usageWindowsForModel(windows, model));
+}
+
+export interface ModelUsageSummary {
+  /** The model the summary was asked about; null when the agent's model is unknown. */
+  model: string | null;
+  /** Windows that apply to the model. Unknown models still get account-wide windows. */
+  windows: UsageWindow[];
+  peak: UsageWindow | null;
+  /** `null` when no applicable window is known — not "0% used". */
+  usedPercent: number | null;
+  resetsAt: string | null;
+}
+
+/** The usage context for one model, so UI and routing agree on what applies. */
+export function modelUsageSummary(
+  usage: Usage | null | undefined,
+  model: string | null | undefined,
+): ModelUsageSummary | null {
+  if (!usage) return null;
+  const windows = usageWindowsForModel(usage.windows, model);
+  const peak = peakUsage(windows);
+  return {
+    model: model ?? null,
+    windows,
+    peak,
+    usedPercent: peak?.usedPercent ?? null,
+    resetsAt: peak?.resetsAt ?? null,
+  };
+}
+
+/** One line about the busiest window that governs `model`, e.g. "51% of weekly limit used". */
+export function usageSummaryForModel(
+  usage: Usage | null | undefined,
+  model: string | null | undefined,
+  now: number = Date.now(),
+): string | null {
+  const peak = usage ? peakUsageForModel(usage.windows, model) : null;
+  if (!peak) return null;
+  const reset = formatResetIn(peak.resetsAt, now);
+  const base = `${formatPercent(peak.usedPercent)} of ${peak.label.toLowerCase()} used`;
+  return reset ? `${base} · resets ${reset}` : base;
 }
 
 const PLAN_LABELS: Record<string, string> = {

@@ -19,13 +19,15 @@ export function retryDelayMs(retryAfter: string | null, now: number = Date.now()
 /**
  * The reading with the window a limit notice is about shown as full, since the notice is the
  * freshest word on usage there is. That window is the one resetting when the notice says it will;
- * when several do, the fullest one.
+ * when several do, the fullest one. `scopeId` narrows the notice to one model group (Antigravity);
+ * Claude and Codex notices leave it out and keep the previous account-wide choice.
  */
-export function showLimit(usage: Usage, resetsAt: string | null): Usage {
+export function showLimit(usage: Usage, resetsAt: string | null, scopeId?: string | null): Usage {
   const at = resetsAt ? Date.parse(resetsAt) : Number.NaN;
   if (!Number.isFinite(at)) return usage;
   let match = -1;
   for (const [index, window] of usage.windows.entries()) {
+    if (scopeId != null && window.scope?.id !== scopeId) continue;
     if (!window.resetsAt || Math.abs(Date.parse(window.resetsAt) - at) > MATCH_MS) continue;
     if (match < 0 || window.usedPercent > (usage.windows[match]?.usedPercent ?? 0)) match = index;
   }

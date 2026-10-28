@@ -4,6 +4,19 @@ import { AccountKindSchema, FamilySchema, type Family } from "../shared/model";
 import { Mutex, readJson, writeJsonAtomic } from "./json-file";
 import { statePath } from "./paths";
 
+export const ScopedLimitKindSchema = z.enum(["window", "budget"]);
+export type ScopedLimitKind = z.infer<typeof ScopedLimitKindSchema>;
+
+/** A limit that applies only to one usage scope (a provider model group), not the whole account. */
+export const ScopedLimitSchema = z.object({
+  /** The `UsageWindow.scope.id` this limit belongs to. */
+  scopeId: z.string(),
+  limitedUntil: z.string(),
+  limitedAt: z.string(),
+  kind: ScopedLimitKindSchema,
+});
+export type ScopedLimit = z.infer<typeof ScopedLimitSchema>;
+
 export const StoredAccountSchema = z.object({
   id: z.string(),
   family: FamilySchema,
@@ -26,6 +39,11 @@ export const StoredAccountSchema = z.object({
   limitKind: z.enum(["window", "budget"]).nullable().default(null),
   /** When the current limit was recorded. */
   limitedAt: z.string().nullable().default(null),
+  /**
+   * Limits that apply to one model group only. The account-wide `limitedUntil` remains the
+   * unscoped limit; a malformed list is dropped rather than losing the whole account.
+   */
+  scopedLimits: z.array(ScopedLimitSchema).default([]).catch([]),
   createdAt: z.string(),
 });
 export type StoredAccount = z.infer<typeof StoredAccountSchema>;
@@ -53,8 +71,12 @@ export const StoredStateSchema = z.object({
   version: z.literal(1).default(1),
   accounts: z.array(StoredAccountSchema).default([]),
   defaults: z
-    .object({ claude: z.string().nullable().default(null), codex: z.string().nullable().default(null) })
-    .default({ claude: null, codex: null }),
+    .object({
+      claude: z.string().nullable().default(null),
+      codex: z.string().nullable().default(null),
+      antigravity: z.string().nullable().default(null),
+    })
+    .default({ claude: null, codex: null, antigravity: null }),
   /** Per-agent overrides of the default account. */
   bindings: z.record(z.string(), BindingSchema).default({}),
   /** Which account each agent's live provider session was opened with. */
@@ -62,7 +84,11 @@ export const StoredStateSchema = z.object({
 });
 export type StoredState = z.infer<typeof StoredStateSchema>;
 
-export const MAIN_ACCOUNT_ID: Record<Family, string> = { claude: "claude-main", codex: "codex-main" };
+export const MAIN_ACCOUNT_ID: Record<Family, string> = {
+  claude: "claude-main",
+  codex: "codex-main",
+  antigravity: "antigravity-main",
+};
 
 export function emptyState(): StoredState {
   return StoredStateSchema.parse({});
@@ -94,7 +120,11 @@ export function salvageState(raw: unknown): { state: StoredState; dropped: boole
     }
     return result;
   };
-  const defaults = keep(StoredStateSchema.shape.defaults, source.defaults) ?? { claude: null, codex: null };
+  const defaults = keep(StoredStateSchema.shape.defaults, source.defaults) ?? {
+    claude: null,
+    codex: null,
+    antigravity: null,
+  };
   return {
     state: {
       version: 1,

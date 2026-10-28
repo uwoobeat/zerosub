@@ -1,6 +1,7 @@
 import type { PluginServerContext, PluginSettingsState } from "@getpaseo/plugin/server";
 import { ClaudeAdapter } from "./server/claude";
 import { CodexAdapter } from "./server/codex";
+import { AntigravityAdapter } from "./server/antigravity";
 import { Service, describe } from "./server/service";
 import { preferences } from "./shared/preferences";
 import {
@@ -19,7 +20,7 @@ import {
 } from "./shared/rpc";
 
 export default function contribute(server: PluginServerContext) {
-  const service = new Service({ claude: new ClaudeAdapter(), codex: new CodexAdapter() });
+  const service = new Service({ claude: new ClaudeAdapter(), codex: new CodexAdapter(), antigravity: new AntigravityAdapter() });
 
   const settings = server.registerSettings(preferences);
   const applySettings = (state: PluginSettingsState<typeof preferences.schema>) => {
@@ -65,7 +66,10 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.handle(getState, ({ refreshUsage }, { paseo }) => service.view(paseo, refreshUsage));
-  server.handle(startLogin, ({ family, method, accountId }) => service.startLogin(family, method, accountId));
+  server.handle(startLogin, ({ family, method, accountId }, { paseo }) => {
+    service.attach(paseo);
+    return service.startLogin(family, method, accountId);
+  });
   server.handle(submitLoginCode, ({ loginId, code }) => service.submitCode(loginId, code));
   server.handle(cancelLogin, ({ loginId }) => service.cancelLogin(loginId));
   server.handle(renameAccount, async ({ accountId, label }) => {

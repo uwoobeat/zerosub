@@ -1,5 +1,5 @@
 /**
- * Codex identity keys. A ChatGPT Business/Team workspace has one account (workspace) ID shared by
+ * CLI identity keys. A ChatGPT Business/Team workspace has one account (workspace) ID shared by
  * every member, so the key pairs it with the member's email. Codex's app-server exposes no member
  * ID, and reading one out of the CLI's token file would mean handling credentials ZeroSub must not.
  */
@@ -25,6 +25,14 @@ function workspaceKey(key: string): { workspace: string; member: string | null }
   return { workspace, member: member || null };
 }
 
+function antigravityKey(key: string): { kind: "sub" | "email"; value: string } | null {
+  for (const kind of ["sub", "email"] as const) {
+    const prefix = `antigravity|${kind}|`;
+    if (key.startsWith(prefix) && key.length > prefix.length) return { kind, value: key.slice(prefix.length) };
+  }
+  return null;
+}
+
 /**
  * Whether a stored account and a fresh sign-in are the same login. Accounts saved before member
  * keys existed hold only the workspace ID; their saved email stands in for the member, and
@@ -34,8 +42,22 @@ export function identityRelation(
   stored: string,
   storedEmail: string | null,
   fresh: string,
+  freshEmail?: string | null,
 ): "same" | "different" | "unknown" {
   if (stored === fresh) return "same";
+  const googleBefore = antigravityKey(stored);
+  const googleAfter = antigravityKey(fresh);
+  if (googleBefore && googleAfter) {
+    if (googleBefore.kind === googleAfter.kind) {
+      return googleBefore.kind === "email" && googleBefore.value.toLowerCase() === googleAfter.value.toLowerCase() ? "same" : "different";
+    }
+    // An initial email-only file can gain an ID token on a later official sign-in. Compare the
+    // available email metadata across key formats; missing claims are unknown, never a mismatch.
+    const beforeEmail = (googleBefore.kind === "email" ? googleBefore.value : storedEmail)?.trim().toLowerCase();
+    const afterEmail = (googleAfter.kind === "email" ? googleAfter.value : freshEmail)?.trim().toLowerCase();
+    if (!beforeEmail || !afterEmail) return "unknown";
+    return beforeEmail === afterEmail ? "same" : "different";
+  }
   const before = workspaceKey(stored);
   const after = workspaceKey(fresh);
   if (!before || !after) return "different";

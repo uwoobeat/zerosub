@@ -131,7 +131,7 @@ describe("failover", () => {
     const { store, reopened, sent, notes, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, antigravity: null },
         bindings: { [AGENT]: { accountId: HELLO, source: "user", at: new Date().toISOString() } },
         sessions: {},
       },
@@ -152,7 +152,7 @@ describe("failover", () => {
     const { store, reopened, notes, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, antigravity: null },
         sessions: {},
       },
       () => ({ kind: "window", resetsAt, message: "You've hit your session limit" }),
@@ -169,7 +169,7 @@ describe("failover", () => {
     const { reopened, notes, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, antigravity: null },
         sessions: {},
       },
       () => ({ kind: "window", resetsAt: inPast(), message: "You've hit your session limit" }),
@@ -187,7 +187,7 @@ describe("failover", () => {
     const { service, store, reopened, notes, paseo } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, antigravity: null },
         sessions: {},
       },
       () => {
@@ -224,7 +224,7 @@ describe("failover", () => {
     const { store, reopened, notes, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, antigravity: null },
         sessions: { [AGENT]: { accountId: MAIN, family: "claude", openedAt } },
       },
       () => ({ kind: "window", resetsAt: inFuture(), message: "You've hit your weekly limit" }),
@@ -243,7 +243,7 @@ describe("failover", () => {
     const { store, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, antigravity: null },
         sessions: { [AGENT]: { accountId: MAIN, family: "claude", openedAt: "2026-09-23T07:00:00.000Z" } },
       },
       () => ({ kind: "window", resetsAt: inFuture(), message: "You've hit your weekly limit" }),
@@ -274,7 +274,7 @@ describe("forking to the other provider", () => {
     await store.update((draft) =>
       Object.assign(draft, {
         accounts: [account(MAIN, "marketing", "main"), { ...account(CODEX_MAIN, "hello", "main"), family: "codex" }],
-        defaults: { claude: MAIN, codex: CODEX_MAIN },
+        defaults: { claude: MAIN, codex: CODEX_MAIN, antigravity: null },
       }),
     );
     const source = {
@@ -295,6 +295,7 @@ describe("forking to the other provider", () => {
     const paseo = {
       config: { get: async () => ({ config: { providers: {} } }) },
       providers: {
+        snapshot: async () => ({ entries: [{ provider: "claude", status: "ready", enabled: true }, { provider: "codex", status: "ready", enabled: true }] }),
         listAvailable: async () => ({ providers: [{ provider: "claude", available: true }, { provider: "codex", available: true }] }),
         listModes: async (provider: string) => ({ modes: MODES[provider] }),
         listModels: async (provider: string) => ({ models: [{ id: provider === "codex" ? "gpt-5.6-sol" : "claude-opus-5-5", isDefault: true }] }),
@@ -372,7 +373,7 @@ describe("disabling an account", () => {
     const { service, store, reopened } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, antigravity: null },
         bindings: { [AGENT]: { accountId: HELLO, source: "user", at: new Date().toISOString() } },
         sessions: { [AGENT]: { accountId: HELLO, family: "claude", openedAt: new Date().toISOString() } },
       },
@@ -400,7 +401,7 @@ describe("changing the default account", () => {
   const openedAt = "2026-09-23T07:00:00.000Z";
   const stateWithLiveAgent = () => ({
     accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-    defaults: { claude: MAIN, codex: null },
+    defaults: { claude: MAIN, codex: null, antigravity: null },
     bindings: {},
     sessions: { [AGENT]: { accountId: MAIN, family: "claude" as const, openedAt } },
   });
@@ -498,7 +499,7 @@ describe("changing the default account", () => {
     const { service, store, paseo, reopened } = await setUpAgents(
       {
         accounts: [account(MAIN, "marketing", "main"), account(WORK, "work", "managed"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: WORK, codex: null },
+        defaults: { claude: WORK, codex: null, antigravity: null },
         bindings: { chosen: { accountId: MAIN, source: "user", at: openedAt } },
         sessions: {
           idle: session(WORK),
@@ -554,7 +555,7 @@ describe("changing the default account", () => {
             ...(work ? [{ ...account(WORK, "work", "managed"), ...work }] : []),
             account(HELLO, "hello", "managed"),
           ] as never,
-          defaults: { claude: MAIN, codex: null },
+          defaults: { claude: MAIN, codex: null, antigravity: null },
           bindings: {},
           sessions: { stuck: session(WORK), fine: session(MAIN) },
         },
@@ -582,7 +583,7 @@ describe("changing the default account", () => {
     ];
     for (const prefs of [KEEP, preferences.schema.parse({})]) {
       const { service, store, paseo, reopened } = await setUpAgents(
-        { accounts, defaults: { claude: WORK, codex: null }, bindings: {}, sessions: { idle: session(WORK), busy: session(WORK) } },
+        { accounts, defaults: { claude: WORK, codex: null, antigravity: null }, bindings: {}, sessions: { idle: session(WORK), busy: session(WORK) } },
         agents,
       );
       service.setPreferences(prefs);
@@ -593,7 +594,7 @@ describe("changing the default account", () => {
 
     // Until another account is chosen, the CLI login is the default.
     const { service, store, paseo, reopened } = await setUpAgents(
-      { accounts, defaults: { claude: null, codex: null }, bindings: {}, sessions: { idle: session(MAIN), busy: session(MAIN) } },
+      { accounts, defaults: { claude: null, codex: null, antigravity: null }, bindings: {}, sessions: { idle: session(MAIN), busy: session(MAIN) } },
       agents,
     );
     expect(await service.setDefault(paseo, MAIN)).toEqual(NOTHING_MOVED);
@@ -610,7 +611,7 @@ describe("changing the default account", () => {
     const { service, store, paseo, context, reopened } = await setUpAgents(
       {
         accounts: [account(MAIN, "marketing", "main"), account(WORK, "work", "managed"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: WORK, codex: null },
+        defaults: { claude: WORK, codex: null, antigravity: null },
       },
       [{ id: "starting", status: "initializing" }],
       {
@@ -651,7 +652,7 @@ describe("changing the default account", () => {
     const { service, store, paseo, reopened } = await setUpAgents(
       {
         accounts: [account(MAIN, "marketing", "main"), account(WORK, "work", "managed"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: WORK, codex: null },
+        defaults: { claude: WORK, codex: null, antigravity: null },
         bindings: {},
         sessions: { reloading: session(WORK) },
       },
@@ -684,7 +685,7 @@ describe("changing the default account", () => {
     const { service, store, paseo, reopened } = await setUpAgents(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: null, codex: null },
+        defaults: { claude: null, codex: null, antigravity: null },
         sessions: { routed: session(MAIN) },
       },
       [
@@ -737,7 +738,7 @@ describe("changing the default account", () => {
     const { service, store, paseo, reopened } = await setUpAgents(
       {
         accounts: [codex(CODEX_MAIN, "chatgpt", "main"), codex("codex-work", "work", "managed")] as never,
-        defaults: { claude: null, codex: CODEX_MAIN },
+        defaults: { claude: null, codex: CODEX_MAIN, antigravity: null },
         sessions: { thread: { accountId: CODEX_MAIN, family: "codex", openedAt } },
       },
       [

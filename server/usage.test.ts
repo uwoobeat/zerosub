@@ -31,6 +31,35 @@ describe("showLimit", () => {
     expect(showLimit(reading(), "2026-09-25T00:00:00.000Z")).toEqual(reading());
     expect(showLimit(reading(), null)).toEqual(reading());
   });
+
+  it("narrows a scoped notice to its model group", () => {
+    const reset = "2026-09-23T08:10:00.000Z";
+    const scoped = reading({
+      windows: [
+        {
+          id: "gemini-5h",
+          label: "Gemini 5h",
+          usedPercent: 40,
+          resetsAt: reset,
+          scope: { id: "gemini", label: "Gemini Models", models: ["gemini-3-pro"] },
+        },
+        {
+          id: "3p-5h",
+          label: "Claude/GPT 5h",
+          usedPercent: 80,
+          resetsAt: reset,
+          scope: { id: "3p", label: "Claude and GPT", models: ["claude-4"] },
+        },
+        { id: "account", label: "Monthly", usedPercent: 10, resetsAt: reset },
+      ],
+    });
+
+    expect(showLimit(scoped, reset, "gemini").windows.map((window) => window.usedPercent)).toEqual([100, 80, 10]);
+    expect(showLimit(scoped, reset, "3p").windows.map((window) => window.usedPercent)).toEqual([40, 100, 10]);
+    // Without a scope the previous account-wide choice stays: the fullest window resetting then.
+    expect(showLimit(scoped, reset).windows.map((window) => window.usedPercent)).toEqual([40, 100, 10]);
+    expect(showLimit(scoped, reset, "unknown")).toEqual(scoped);
+  });
 });
 
 describe("mergeUsage", () => {

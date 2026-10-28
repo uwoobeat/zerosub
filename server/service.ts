@@ -21,6 +21,7 @@ import type { RedeemResult, ReopenSummary } from "../shared/rpc";
 import { SWITCH_ROW_KIND, SWITCH_ROW_VERSION, type SwitchRow } from "../shared/timeline";
 import {
   applyEnv,
+  type EnvPatch,
   type AgentTimelineItem,
   type FamilyAdapter,
   type Identity,
@@ -30,7 +31,7 @@ import {
   type RedeemReply,
   type UsageRead,
 } from "./adapter";
-import { FamilyResolver } from "./families";
+import { bringsOwnAuth, FamilyResolver } from "./families";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
 import { identityRelation } from "./identity";
@@ -56,9 +57,9 @@ import {
 type PaseoApi = PluginHookContext["paseo"];
 type TurnEnded = PluginLifecycleEvents["agent.turn_ended"];
 
-const FAMILIES: readonly Family[] = ["claude", "codex"];
-const PROVIDER_NAME: Record<Family, string> = { claude: "Claude Code", codex: "Codex" };
-const OTHER_FAMILY: Record<Family, Family> = { claude: "codex", codex: "claude" };
+const FAMILIES: readonly Family[] = ["claude", "codex", "antigravity"];
+const PROVIDER_NAME: Record<Family, string> = { claude: "Claude Code", codex: "Codex", antigravity: "Antigravity" };
+const OTHER_FAMILY: Record<Family, Family | null> = { claude: "codex", codex: "claude", antigravity: null };
 /** How often to read usage: accounts in use, the defaults, and the rest. Adapters space reads further. */
 const USAGE_BUSY_MS = 60_000;
 const USAGE_DEFAULT_MS = 5 * 60_000;
@@ -92,6 +93,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   showComposerPill: true,
   autoRedeem: false,
   forkOtherProvider: false,
+  antigravityAutoSwitch: false,
 };
 
 interface LoginSession {
@@ -114,6 +116,7 @@ interface AgentInfo {
   /** The conversation has started (so a Codex thread already holds account-bound reasoning). */
   hasHistory: boolean;
   title: string | null;
+  model: string | null;
   /** The agent this one carries on from, when ZeroSub started it as a continuation. */
   continuedFrom: string | null;
 }
@@ -138,8 +141,11 @@ export class Service {
   private readonly usageInFlight = new Map<string, Promise<void>>();
   private readonly identityCheckedAt = new Map<string, number>();
   private readonly availability = new Map<Family, { ok: boolean; detail: string | null; at: number }>();
+  private readonly familyChecks = new Map<Family, Promise<void>>();
   private readonly logins = new Map<string, LoginSession>();
-  private readonly loginLocks: Record<Family, Mutex> = { claude: new Mutex(), codex: new Mutex() };
+  private readonly loginLocks: Record<Family, Mutex> = { claude: new Mutex(), codex: new Mutex(), antigravity: new Mutex() };
+  private readonly agentModels = new Map<string, string | null>();
+  private readonly continuationLocks = new Map<string, Mutex>();
   /** Agents whose account changed mid-turn; reopened when the turn ends. */
   private readonly deferred = new Map<string, SwitchRow | null>();
   /** Agents in the middle of a failover, so nothing else moves them at the same time. */
@@ -166,25 +172,55 @@ export class Service {
   private stopped = false;
 
   constructor(
-    private readonly adapters: Record<Family, FamilyAdapter>,
+    private readonly adapters: Partial<Record<Family, FamilyAdapter>>,
     private readonly store = new StateStore(),
     private readonly families = new FamilyResolver(),
     private readonly reopener = new Reopener(),
   ) {}
 
+  private adapter(family: Family): FamilyAdapter {
+    const adapter = this.adapters[family];
+    if (!adapter) throw new Error(`${FAMILY_LABEL[family]} support isn't available on this host.`);
+    return adapter;
+  }
+
+  private supportedFamilies(): Family[] {
+    return FAMILIES.filter((family) => Boolean(this.adapters[family]));
+  }
+
+  private capabilities(family: Family): NonNullable<FamilyAdapter["capabilities"]> {
+    return this.adapter(family).capabilities ?? {
+      managedAccounts: family !== "antigravity",
+      loginMethods: family === "antigravity" ? [] : ["browser", "code"],
+      autoSwitch: family !== "antigravity",
+      resets: family !== "antigravity",
+      fork: family !== "antigravity",
+    };
+  }
+
+  private autoSwitchFor(family: Family): boolean {
+    return this.prefs.autoSwitch && this.capabilities(family).autoSwitch &&
+      (family !== "antigravity" || this.prefs.antigravityAutoSwitch);
+  }
+
   setPreferences(prefs: Preferences): void {
-    this.prefs = prefs;
+    this.prefs = {
+      ...prefs,
+      antigravityAutoSwitch: this.adapters.antigravity?.capabilities?.autoSwitch ? prefs.antigravityAutoSwitch : false,
+    };
   }
 
   /** Remember the plugin's SDK connection for background work (cleanup, failover). */
   attach(paseo: PaseoApi): void {
-    this.paseo ??= paseo;
+    if (this.paseo) return;
+    this.paseo = paseo;
+    if (this.adapters.antigravity) void this.ensureFamily("antigravity").catch(() => undefined);
   }
 
   async start(): Promise<void> {
     // The last readings show right away; fresh ones replace them as they arrive.
     for (const [accountId, reading] of await loadReadings()) if (!this.usage.has(accountId)) this.usage.set(accountId, reading);
-    await Promise.all(FAMILIES.map((family) => this.ensureFamily(family)));
+    await Promise.all(this.supportedFamilies().map((family) => this.ensureFamily(family)));
     this.timer = setInterval(() => void this.tick().catch((error: unknown) => log("upkeep failed", error)), UPKEEP_MS);
     this.timer.unref?.();
     void this.tick().catch(() => undefined);
@@ -203,8 +239,19 @@ export class Service {
   // ------------------------------------------------------------------ upkeep
 
   /** Checks the CLI is installed and registers its own login as an account. */
-  private async ensureFamily(family: Family): Promise<void> {
-    const adapter = this.adapters[family];
+  private ensureFamily(family: Family): Promise<void> {
+    const pending = this.familyChecks.get(family);
+    if (pending) return pending;
+    const check = this.checkFamily(family).finally(() => this.familyChecks.delete(family));
+    this.familyChecks.set(family, check);
+    return check;
+  }
+
+  private async checkFamily(family: Family): Promise<void> {
+    if (family === "antigravity") {
+      if (!this.paseo || !Object.values(await this.families.resolve(this.paseo)).includes(family)) return;
+    }
+    const adapter = this.adapter(family);
     const availability = await adapter.available().catch((error: unknown) => ({ ok: false, detail: describe(error) }));
     this.availability.set(family, { ...availability, at: Date.now() });
     if (!availability.ok) return;
@@ -225,9 +272,9 @@ export class Service {
   private async tick(): Promise<void> {
     if (this.stopped) return;
     const now = Date.now();
-    for (const family of FAMILIES) {
+    for (const family of this.supportedFamilies()) {
       const availability = this.availability.get(family);
-      if (availability && !availability.ok && now - availability.at > AVAILABILITY_MS) {
+      if (!availability || (!availability.ok && now - availability.at > AVAILABILITY_MS)) {
         void this.ensureFamily(family).catch(() => undefined);
       }
     }
@@ -252,10 +299,15 @@ export class Service {
   }
 
   private async refreshIdentity(accountId: string): Promise<void> {
+    const sinceUsage = Date.now() - (this.usageAttemptAt.get(accountId) ?? 0);
     this.identityCheckedAt.set(accountId, Date.now());
     const account = findAccount(await this.store.read(), accountId);
     if (!account) return;
-    const identity = await this.adapters[account.family].identity(account.home).catch(() => null);
+    if (!(await this.canReadAccount(account))) return;
+    // Antigravity verifies identity via quota; its identity refresh must respect the same minimum
+    // spacing as usage, even when an explicit refresh requests both at once.
+    if (account.family === "antigravity" && sinceUsage < this.adapter(account.family).usageSpacingMs) return;
+    const identity = await this.adapter(account.family).identity(account.home).catch(() => null);
     if (!identity) return;
     await this.store.update((draft) => {
       const target = findAccount(draft, accountId);
@@ -301,7 +353,7 @@ export class Service {
       }
       for (const name of names) {
         const home = join(root, name);
-        const family: Family | null = name.startsWith("claude-") ? "claude" : name.startsWith("codex-") ? "codex" : null;
+        const family = this.supportedFamilies().find((entry) => name.startsWith(`${entry}-`));
         if (!family || owned.has(home)) continue;
         // A managed account's ID is its home's folder name, so sessions still name it after removal.
         const users = Object.entries(state.sessions)
@@ -316,7 +368,7 @@ export class Service {
           }
         }
         if (live) continue;
-        await this.adapters[family].logout(home).catch((error: unknown) => log(`signing out ${name} failed`, error));
+        await this.adapter(family).logout(home).catch((error: unknown) => log(`signing out ${name} failed`, error));
         await removeHome(home);
         if (users.length > 0) {
           await this.store.update((draft) => {
@@ -362,8 +414,17 @@ export class Service {
   ): Promise<PluginSessionOpenRequest | undefined> {
     this.attach(context.paseo);
     const family = (await this.families.resolve(context.paseo))[request.provider];
-    if (!family) return undefined;
-    const adapter = this.adapters[family];
+    if (!family || !this.adapters[family]) return undefined;
+    if (family === "antigravity" && (bringsOwnAuth(family, request.env) || request.env.HOME)) {
+      if (request.purpose === "interactive") {
+        await this.store.update((draft) => { delete draft.sessions[request.agentId]; });
+      }
+      return undefined;
+    }
+    const adapter = this.adapter(family);
+    // Model metadata is local Paseo state, never a quota/API query on the session hook.
+    const model = family === "antigravity" ? (await agentInfo(context.paseo, request.agentId))?.model ?? null : null;
+    this.agentModels.set(request.agentId, model);
     const now = Date.now();
     const state = await this.store.read();
     const decision = chooseAccount(state, {
@@ -371,16 +432,39 @@ export class Service {
       family,
       reason: request.reason,
       now,
-      autoSwitch: this.prefs.autoSwitch,
-      balanceNewAgents: this.prefs.balanceNewAgents,
+      autoSwitch: this.autoSwitchFor(family),
+      balanceNewAgents: this.prefs.balanceNewAgents && (family !== "antigravity" || this.autoSwitchFor(family)),
       portable: adapter.portable,
       usageOf: (id) => this.usage.get(id),
+      model,
     });
     if (!decision) return undefined;
     const { account } = decision;
 
     if (account.kind === "managed" && account.home) {
-      await adapter.prepareHome(account.home).catch((error: unknown) => log(`could not refresh the home of ${account.label}`, error));
+      try {
+        await adapter.prepareHome(account.home);
+      } catch (error) {
+        log(`could not refresh the home of ${account.label}`, error);
+        // Never route Antigravity through a home whose isolation could not be verified.
+        if (family === "antigravity") {
+          if (request.purpose === "interactive") {
+            await this.store.update((draft) => { delete draft.sessions[request.agentId]; });
+          }
+          return undefined;
+        }
+      }
+    }
+    let patch: EnvPatch;
+    try {
+      patch = await adapter.env(account.home);
+    } catch (error) {
+      if (family !== "antigravity") throw error;
+      log(`could not verify the credentials of ${account.label}`, error);
+      if (request.purpose === "interactive") {
+        await this.store.update((draft) => { delete draft.sessions[request.agentId]; });
+      }
+      return undefined;
     }
     const interactive = request.purpose === "interactive";
     const seenBinding = state.bindings[request.agentId]?.accountId;
@@ -403,7 +487,7 @@ export class Service {
         decision.skipped ? `; skipped ${decision.skipped.account.label}: ${decision.skipped.why}` : ""
       })`,
     );
-    return { ...request, env: applyEnv(await adapter.env(account.home), request.env) };
+    return { ...request, env: applyEnv(patch, request.env) };
   }
 
   /** A turn uses the account from its first token, so a long one keeps its usage fresh too. */
@@ -419,7 +503,7 @@ export class Service {
     this.attach(context.paseo);
     const family = (await this.families.resolve(context.paseo))[event.agent.provider];
     if (!family) return;
-    const adapter = this.adapters[family];
+    const adapter = this.adapter(family);
     const agentId = event.agent.id;
     const accountId = this.runningOn(await this.store.read(), agentId, family);
     if (accountId) this.activeAt.set(accountId, Date.now());
@@ -436,6 +520,7 @@ export class Service {
   }
 
   async onAgentArchived(agentId: string): Promise<void> {
+    this.agentModels.delete(agentId);
     this.deferred.delete(agentId);
     this.switchGuard.forget(agentId);
     this.guardNoticeAt.delete(agentId);
@@ -492,7 +577,7 @@ export class Service {
     } finally {
       this.switching.delete(agentId);
     }
-    if (exhausted && this.prefs.autoSwitch && this.adapters[family].portable) {
+    if (exhausted && this.autoSwitchFor(family) && this.adapter(family).portable) {
       void this.moveIdleAgentsOff(paseo, exhausted, family, agentId, problem.kind).catch((error: unknown) =>
         log("moving idle agents failed", error),
       );
@@ -507,8 +592,11 @@ export class Service {
     timeline: readonly AgentTimelineItem[],
     problem: Problem,
   ): Promise<void> {
-    const adapter = this.adapters[family];
+    const adapter = this.adapter(family);
     const now = Date.now();
+    const scopeId = problem.kind === "limit" ? problem.hit.scopeId : undefined;
+    // An unscoped Antigravity error cannot prove which shared model quota was exhausted.
+    if (family === "antigravity" && problem.kind === "limit" && !scopeId) return;
     if (problem.kind === "limit" && problem.hit.kind === "window" && this.recentlyRedeemed(account.id)) {
       // This turn hit the limit just before a reset refilled it (another agent's failover or the
       // user spent one moments ago). The account has room again: carry on instead of switching.
@@ -526,17 +614,17 @@ export class Service {
     if (problem.kind === "limit") {
       const { hit } = problem;
       resetsAt = hit.resetsAt ?? new Date(now + (hit.kind === "budget" ? BUDGET_LIMIT_MS : WINDOW_LIMIT_MS)).toISOString();
-      await this.markLimited(account.id, resetsAt, hit.kind);
+      await this.markLimited(account.id, resetsAt, hit.kind, scopeId);
       if (hit.kind === "window") {
         // The notice is the freshest word on usage: show that window full until a new reading lands.
         const shown = this.usage.get(account.id);
-        if (shown) this.setUsage(account.id, showLimit(shown, hit.resetsAt));
+        if (shown) this.setUsage(account.id, showLimit(shown, hit.resetsAt, scopeId));
         // The account was just used, so its token is fresh: ask for the exact reset time.
         await withTimeout(this.refreshUsage(account.id, true), 12_000);
-        const exact = this.resetFromUsage(account.id);
+        const exact = this.resetFromUsage(account.id, scopeId);
         if (exact && Date.parse(exact) > now) {
           resetsAt = exact;
-          await this.markLimited(account.id, exact, "window");
+          await this.markLimited(account.id, exact, "window", scopeId);
         }
       }
       console.log(`[ZeroSub] ${account.label} hit a ${hit.kind} limit (agent ${agentId}): ${hit.message}`);
@@ -544,7 +632,7 @@ export class Service {
       console.log(`[ZeroSub] ${account.label} is signed out (agent ${agentId})`);
     }
 
-    if (!this.prefs.autoSwitch) return;
+    if (!this.autoSwitchFor(family)) return;
     const latest = await this.store.read();
     if (this.runningOn(latest, agentId, family) !== account.id) return; // Already moved.
     const base = {
@@ -573,9 +661,9 @@ export class Service {
       }
       return;
     }
-    const next = mostAvailable(latest, family, (id) => this.usage.get(id), now, new Set([account.id]));
+    const next = mostAvailable(latest, family, (id) => this.usage.get(id), now, new Set([account.id]), this.agentModels.get(agentId));
     if (!next) {
-      if (problem.kind === "limit" && problem.hit.kind === "window" && this.prefs.autoRedeem && !account.disabled) {
+      if (problem.kind === "limit" && problem.hit.kind === "window" && this.prefs.autoRedeem && this.capabilities(family).resets && !account.disabled) {
         // Opt-in: every account is out, so spend a banked reset rather than stop.
         const reply = await this.redeemOn(account, true);
         if (reply.outcome === "reset") {
@@ -615,10 +703,11 @@ export class Service {
       }
       if (reason !== "limit") return;
       let detail: string | null = null;
-      if (this.prefs.forkOtherProvider) {
+      const other = OTHER_FAMILY[family];
+      if (other && this.capabilities(family).fork && this.prefs.forkOtherProvider) {
         // Opt-in: every account of this provider is out, so carry on with the other provider.
         const result = await this.forkToOtherProvider(paseo, agentId, family, timeline, "auto").catch((error: unknown) => ({
-          skipped: `Couldn't continue on ${FAMILY_LABEL[OTHER_FAMILY[family]]}: ${describe(error)}`,
+          skipped: `Couldn't continue on ${FAMILY_LABEL[other]}: ${describe(error)}`,
         }));
         if ("fork" in result) {
           this.switchGuard.note(agentId, now);
@@ -633,10 +722,10 @@ export class Service {
           });
           return;
         }
-        console.log(`[ZeroSub] not continuing ${agentId} on ${FAMILY_LABEL[OTHER_FAMILY[family]]}: ${result.skipped}`);
+        console.log(`[ZeroSub] not continuing ${agentId} on ${FAMILY_LABEL[other]}: ${result.skipped}`);
         detail = result.skipped;
-      } else if (mostAvailable(latest, OTHER_FAMILY[family], (id) => this.usage.get(id), now, new Set())) {
-        detail = `Or continue on ${FAMILY_LABEL[OTHER_FAMILY[family]]} in a new agent from the account button.`;
+      } else if (other && this.capabilities(family).fork && mostAvailable(latest, other, (id) => this.usage.get(id), now, new Set())) {
+        detail = `Or continue on ${FAMILY_LABEL[other]} in a new agent from the account button.`;
       }
       await this.appendRow(paseo, agentId, { ...base, to: account.label, reason: "exhausted", outcome: "stayed", detail });
       return;
@@ -664,20 +753,23 @@ export class Service {
     }
 
     // A ChatGPT thread can't move to another account; carry the work on in a new agent there.
+    await this.store.update((draft) => {
+      draft.bindings[agentId] = { accountId: account.id, source: "thread", at: new Date().toISOString() };
+    });
     if (!this.prefs.autoContinue) {
       await this.appendRow(paseo, agentId, {
         ...base,
         to: next.label,
         reason,
         outcome: "stayed",
-        detail: `New ChatGPT agents will use ${next.label}.`,
+        detail: `New ${FAMILY_LABEL[family]} agents will use ${next.label}.`,
       });
       return;
     }
     const why =
       reason === "limit"
-        ? `its ChatGPT account (${account.label}) reached its usage limit`
-        : `its ChatGPT account (${account.label}) was signed out`;
+        ? `its ${FAMILY_LABEL[family]} account (${account.label}) reached its usage limit`
+        : `its ${FAMILY_LABEL[family]} account (${account.label}) was signed out`;
     try {
       const continuation = await this.continueElsewhere(paseo, agentId, next, why, timeline, "auto");
       this.switchGuard.note(agentId, now);
@@ -701,10 +793,15 @@ export class Service {
     }
   }
 
-  private async markLimited(accountId: string, until: string, kind: LimitKind): Promise<void> {
+  private async markLimited(accountId: string, until: string, kind: LimitKind, scopeId?: string): Promise<void> {
     await this.store.update((draft) => {
       const account = findAccount(draft, accountId);
       if (!account) return;
+      if (scopeId) {
+        account.scopedLimits = account.scopedLimits.filter((limit) => limit.scopeId !== scopeId);
+        account.scopedLimits.push({ scopeId, limitedUntil: until, limitedAt: new Date().toISOString(), kind });
+        return;
+      }
       account.limitedUntil = until;
       account.limitKind = kind;
       account.limitedAt = new Date().toISOString();
@@ -723,13 +820,16 @@ export class Service {
    * still sees the limit, so hosts sharing the account can't spend two on the same limit.
    */
   private redeemOn(account: StoredAccount, automatic: boolean): Promise<RedeemReply> {
+    if (!this.capabilities(account.family).resets) {
+      return Promise.resolve({ outcome: "unavailable", message: `${FAMILY_LABEL[account.family]} doesn't support banked resets.`, left: null });
+    }
     let lock = this.redeemLocks.get(account.id);
     if (!lock) this.redeemLocks.set(account.id, (lock = new Mutex()));
     return lock.run(async () => {
       if (automatic && this.recentlyRedeemed(account.id)) {
         return { outcome: "reset", message: "A reset was just used on this account.", left: null };
       }
-      const reply = await this.adapters[account.family]
+      const reply = await this.adapter(account.family)
         .redeemReset(account.home, { onlyAtLimit: automatic })
         .catch((error: unknown): RedeemReply => ({ outcome: "error", message: describe(error), left: null }));
       console.log(`[ZeroSub] banked reset on ${account.label}: ${reply.outcome}`);
@@ -813,10 +913,10 @@ export class Service {
   }
 
   /** The reset time of the window that is full, from the freshest live usage reading. */
-  private resetFromUsage(accountId: string): string | null {
+  private resetFromUsage(accountId: string, scopeId?: string): string | null {
     const usage = this.usage.get(accountId);
     if (!usage || usage.cached) return null;
-    const full = usage.windows.filter((window) => window.usedPercent >= 99 && window.resetsAt);
+    const full = usage.windows.filter((window) => (!scopeId || window.scope?.id === scopeId) && window.usedPercent >= 99 && window.resetsAt);
     full.sort((a, b) => Date.parse(b.resetsAt ?? "") - Date.parse(a.resetsAt ?? ""));
     return full[0]?.resetsAt ?? null;
   }
@@ -826,7 +926,7 @@ export class Service {
     try {
       const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 40 });
       const timeline = page.entries.map((entry) => entry.item);
-      return this.adapters[family].detectLimit({ outcome: { kind: "completed" }, timeline }) !== null;
+      return this.adapter(family).detectLimit({ outcome: { kind: "completed" }, timeline }) !== null;
     } catch {
       return true; // When unsure, leave it alone.
     }
@@ -902,6 +1002,9 @@ export class Service {
     source: "auto" | "user",
   ): Promise<{ fork: Continuation; account: StoredAccount; family: Family } | { skipped: string }> {
     const other = OTHER_FAMILY[family];
+    if (!other || !this.capabilities(family).fork || !this.adapters[other]) {
+      return { skipped: `${FAMILY_LABEL[family]} doesn't support continuing on another provider.` };
+    }
     const name = FAMILY_LABEL[other];
     const families = await this.families.resolve(paseo);
     const state = await this.store.read();
@@ -948,7 +1051,7 @@ export class Service {
         await this.store.update((draft) => {
           draft.bindings[newAgentId] = {
             accountId: account.id,
-            source: source === "user" ? "user" : this.adapters[other].portable ? "auto" : "thread",
+            source: source === "user" ? "user" : this.adapter(other).portable ? "auto" : "thread",
             at: new Date().toISOString(),
           };
         });
@@ -964,7 +1067,7 @@ export class Service {
     const info = await agentInfo(paseo, agentId);
     if (!info || info.archived) throw new Error("That agent is no longer available.");
     const family = (await this.families.resolve(paseo))[info.provider];
-    if (!family) throw new Error(`${info.provider} agents don't use Claude or ChatGPT subscription accounts.`);
+    if (!family) throw new Error(`${info.provider} agents don't use ZeroSub subscription accounts.`);
     if (info.status === "running" || info.status === "initializing") {
       throw new Error("This agent is working right now. Wait for its turn to finish, then continue it elsewhere.");
     }
@@ -987,7 +1090,7 @@ export class Service {
     return result.fork;
   }
 
-  private async continueElsewhere(
+  private continueElsewhere(
     paseo: PaseoApi,
     agentId: string,
     target: StoredAccount,
@@ -995,11 +1098,42 @@ export class Service {
     timeline: readonly AgentTimelineItem[] | undefined,
     source: "auto" | "user",
   ): Promise<Continuation> {
+    let lock = this.continuationLocks.get(agentId);
+    if (!lock) this.continuationLocks.set(agentId, (lock = new Mutex()));
+    return lock.run(() => this.continueElsewhereOnce(paseo, agentId, target, why, timeline, source));
+  }
+
+  private async continueElsewhereOnce(
+    paseo: PaseoApi,
+    agentId: string,
+    target: StoredAccount,
+    why: string,
+    timeline: readonly AgentTimelineItem[] | undefined,
+    source: "auto" | "user",
+  ): Promise<Continuation> {
+    const families = await this.families.resolve(paseo);
+    const state = await this.store.read();
+    const earlier = (await listAgents(paseo, false)).agents.find((agent) =>
+      !agent.archived && agent.continuedFrom === agentId && families[agent.provider] === target.family &&
+      (state.sessions[agent.id]?.accountId ?? state.bindings[agent.id]?.accountId) === target.id);
+    if (earlier) return { agentId: earlier.id, title: earlier.title ?? `${FAMILY_LABEL[target.family]} agent` };
+    if (target.family === "antigravity") {
+      // Paseo cannot replay Antigravity's transcript after a daemon restart. Creating an empty
+      // continuation would claim to transfer context it never received.
+      if (!timeline) {
+        const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 500 });
+        timeline = page.entries.map((entry) => entry.item);
+      }
+      if (!timeline.some((item) => (item.type === "user_message" || item.type === "assistant_message") && item.text.trim())) {
+        throw new Error("This Antigravity conversation's history is unavailable. Start a new agent on the other account and provide its task context.");
+      }
+    }
     return continueInNewAgent({
       paseo,
       sourceAgentId: agentId,
       timeline,
       why,
+      previous: PROVIDER_NAME[target.family],
       bind: async (newAgentId) => {
         await this.store.update((draft) => {
           draft.bindings[newAgentId] = {
@@ -1021,10 +1155,11 @@ export class Service {
       family,
       reason: "refresh",
       now: Date.now(),
-      autoSwitch: this.prefs.autoSwitch,
+      autoSwitch: this.autoSwitchFor(family),
       balanceNewAgents: false,
-      portable: this.adapters[family].portable,
+      portable: this.adapter(family).portable,
       usageOf: (id) => this.usage.get(id),
+      model: this.agentModels.get(agentId),
     })?.account.id;
   }
 
@@ -1058,7 +1193,7 @@ export class Service {
     // Reloading an archived agent would unarchive it; a closed one routes itself when it next opens.
     if (info.archived || info.status === "closed") return "closed";
     const family = (await this.families.resolve(paseo))[info.provider];
-    if (family && !this.adapters[family].portable && info.hasHistory) {
+    if (family && !this.adapter(family).portable && info.hasHistory) {
       // The thread gained history while waiting, so it can no longer change accounts: keep it put.
       const state = await this.store.read();
       const current = this.runningOn(state, agentId, family);
@@ -1147,6 +1282,12 @@ export class Service {
 
   // ------------------------------------------------------------------ usage
 
+  /** A provider reconfigured for API keys or another runtime no longer uses these subscriptions. */
+  private async canReadAccount(account: StoredAccount): Promise<boolean> {
+    return account.family !== "antigravity" || Boolean(this.paseo &&
+      Object.values(await this.families.resolve(this.paseo)).includes("antigravity"));
+  }
+
   /** `renewLogin` lets the CLI refresh an expired sign-in first (explicit refreshes only: it's slow). */
   refreshUsage(accountId: string, force = false, renewLogin = false): Promise<void> {
     const pending = this.usageInFlight.get(accountId);
@@ -1158,10 +1299,11 @@ export class Service {
     const task = (async () => {
       const account = findAccount(await this.store.read(), accountId);
       if (!account) return;
-      const spacing = this.adapters[account.family].usageSpacingMs;
+      if (!(await this.canReadAccount(account))) return;
+      const spacing = this.adapter(account.family).usageSpacingMs;
       if (since < (force ? spacing : Math.max(spacing, 60_000))) return;
       this.usageAttemptAt.set(accountId, Date.now());
-      const { retryAt, ...usage } = await this.adapters[account.family]
+      const { retryAt, ...usage } = await this.adapter(account.family)
         .usage(account.home, { renewLogin })
         .catch(
           (error: unknown): UsageRead => ({ fetchedAt: new Date().toISOString(), windows: [], error: describe(error), cached: false, resets: null }),
@@ -1172,7 +1314,11 @@ export class Service {
       // Only a live reading may change an account's limit state.
       if (usage.windows.length === 0 || usage.error || usage.cached) return;
       const now = Date.now();
-      const full = usage.windows.find((window) => window.usedPercent >= 100 && window.resetsAt);
+      if (account.family === "antigravity") {
+        await this.updateScopedLimits(accountId, usage, now);
+        return;
+      }
+      const full = usage.windows.find((window) => window.usedPercent >= 100 && window.resetsAt && Date.parse(window.resetsAt) > now);
       if (full && !isLimited(account, now)) {
         await this.markLimited(accountId, full.resetsAt ?? new Date(now + WINDOW_LIMIT_MS).toISOString(), "window");
         return;
@@ -1194,6 +1340,42 @@ export class Service {
     return task;
   }
 
+  /** Shared model quotas never turn into an account-wide subscription limit. */
+  private async updateScopedLimits(accountId: string, usage: Usage, now: number): Promise<void> {
+    const groups = new Map<string, Usage["windows"]>();
+    for (const quota of usage.windows) {
+      if (!quota.scope) continue;
+      const group = groups.get(quota.scope.id) ?? [];
+      group.push(quota);
+      groups.set(quota.scope.id, group);
+    }
+    if (groups.size === 0) return;
+    await this.store.update((draft) => {
+      const account = findAccount(draft, accountId);
+      if (!account) return;
+      // Retire expired scopes no longer reported; a missing group alone cannot refute a fresh
+      // notification, and budget limits are never cleared from quota readings.
+      account.scopedLimits = account.scopedLimits.filter((limit) => limit.kind === "budget" || groups.has(limit.scopeId) ||
+        Date.parse(limit.limitedUntil) > now || Date.parse(usage.fetchedAt) < Date.parse(limit.limitedAt));
+      for (const [scopeId, windows] of groups) {
+        const existing = account.scopedLimits.find((limit) => limit.scopeId === scopeId);
+        if (existing?.kind === "budget") continue;
+        // A delayed read cannot undo a newer limit notification.
+        if (existing && Date.parse(usage.fetchedAt) < Date.parse(existing.limitedAt)) continue;
+        const resets = windows.filter((quota) => quota.usedPercent >= 100 && quota.resetsAt && Date.parse(quota.resetsAt) > now)
+          .map((quota) => quota.resetsAt as string).sort((a, b) => Date.parse(b) - Date.parse(a));
+        const until = resets[0];
+        if (until) {
+          if (existing?.limitedUntil === until) continue;
+          account.scopedLimits = account.scopedLimits.filter((limit) => limit.scopeId !== scopeId);
+          account.scopedLimits.push({ scopeId, limitedUntil: until, limitedAt: new Date(now).toISOString(), kind: "window" });
+        } else if (existing && now - Date.parse(existing.limitedAt) > LIMIT_TRUST_MS && windows.every((quota) => quota.usedPercent < 90)) {
+          account.scopedLimits = account.scopedLimits.filter((limit) => limit.scopeId !== scopeId);
+        }
+      }
+    });
+  }
+
   /** Records a reading and saves the readings shortly after, so a restart shows them straight away. */
   private setUsage(accountId: string, usage: Usage | null): void {
     if (usage) this.usage.set(accountId, usage);
@@ -1212,7 +1394,12 @@ export class Service {
     this.attach(paseo);
     if (refreshUsage) {
       const state = await this.store.read();
-      await Promise.allSettled(state.accounts.map((account) => this.refreshUsage(account.id, true, true)));
+      await Promise.allSettled(state.accounts.flatMap((account) => [
+        this.refreshUsage(account.id, true, true),
+        // The Antigravity adapter can confirm a missing private credential without launching a
+        // CLI. Explicit refresh should expose Sign in again instead of leaving an unusable card.
+        ...(account.family === "antigravity" ? [this.refreshIdentity(account.id)] : []),
+      ]));
     }
     void this.prune(paseo).catch(() => undefined);
     const state = await this.store.read();
@@ -1224,7 +1411,8 @@ export class Service {
     const counts = new Map<string, number>();
     for (const agent of agents) {
       const family = families[agent.provider];
-      if (!family || agent.archived) continue;
+      if (!family || !this.adapters[family] || agent.archived) continue;
+      this.agentModels.set(agent.id, agent.model);
       const accountId = this.targetFor(state, agent.id, family);
       if (!accountId) continue;
       counts.set(accountId, (counts.get(accountId) ?? 0) + 1);
@@ -1236,7 +1424,8 @@ export class Service {
         accountId,
         pinned: Boolean(binding && binding.source !== "thread"),
         pendingAccountId: current && current !== accountId ? current : null,
-        movable: this.adapters[family].portable || !agent.hasHistory,
+        movable: this.adapter(family).portable || !agent.hasHistory,
+        model: agent.model,
       });
     }
 
@@ -1264,10 +1453,22 @@ export class Service {
       agents: routes,
       logins: [...this.logins.values()].map((login) => login.view),
       providers: families,
+      capabilities: Object.fromEntries(this.supportedFamilies().map((family) => {
+        const supported = this.capabilities(family);
+        const available = this.availability.get(family)?.ok;
+        return [family, family === "antigravity" && (!available || !Object.values(families).includes(family))
+          ? { managedAccounts: false, loginMethods: [], autoSwitch: false, resets: false, fork: false }
+          : supported];
+      })),
       canReopen: (await this.reopener.locate()) !== null,
       browserSignIn: this.browserSignIn,
       showComposerPill: this.prefs.showComposerPill,
-      warnings: await this.warnings(),
+      warnings: [
+        ...await this.warnings(),
+        ...(accounts.some((account) => account.family === "antigravity") && !Object.values(families).includes("antigravity")
+          ? ["Antigravity isn't available for subscription accounts in this host's current provider configuration. Saved Antigravity accounts aren't routed or refreshed."]
+          : []),
+      ],
     };
   }
 
@@ -1281,7 +1482,10 @@ export class Service {
 
   private cachedAgents(paseo: PaseoApi): Promise<AgentInfo[]> {
     if (this.agentCache && Date.now() - this.agentCache.at < AGENT_LIST_MS) return this.agentCache.agents;
-    const agents = listAgents(paseo, false).then((result) => result.agents);
+    const agents = listAgents(paseo, false).then((result) => {
+      for (const agent of result.agents) this.agentModels.set(agent.id, agent.model);
+      return result.agents;
+    });
     this.agentCache = { at: Date.now(), agents };
     agents.catch(() => {
       this.agentCache = null;
@@ -1323,7 +1527,7 @@ export class Service {
     if (!account) throw new Error("That account no longer exists.");
     if (!account.signedIn) throw new Error(`${account.label} is signed out. Sign it in first.`);
     if (account.disabled) throw new Error(`${account.label} is disabled. Enable it before making it the default.`);
-    const portable = this.adapters[account.family].portable;
+    const portable = this.adapter(account.family).portable;
     if (!portable) await this.pinThreads(paseo, account.family);
     await this.store.update((draft) => {
       draft.defaults[account.family] = account.id;
@@ -1362,12 +1566,13 @@ export class Service {
     console.log(`[ZeroSub] ${account.label} is ${enabled ? "enabled" : "disabled"}`);
     const summary = await this.reconcile(paseo, enabled ? "enabled" : "disabled");
     let stayed = 0;
-    if (!enabled && !this.adapters[account.family].portable) {
+    if (!enabled && !this.adapter(account.family).portable) {
       const families = await this.families.resolve(paseo);
       const latest = await this.store.read();
       stayed = (await listAgents(paseo, false)).agents.filter(
         (agent) =>
-          families[agent.provider] === account.family && agent.hasHistory && this.targetFor(latest, agent.id, account.family) === accountId,
+          families[agent.provider] === account.family && agent.hasHistory &&
+          (latest.sessions[agent.id]?.accountId ?? latest.bindings[agent.id]?.accountId ?? this.runningOn(latest, agent.id, account.family)) === accountId,
       ).length;
     }
     return { ...summary, stayed };
@@ -1444,6 +1649,7 @@ export class Service {
       if (!account) return;
       account.limitedUntil = null;
       account.limitKind = null;
+      account.scopedLimits = [];
     });
     if (!findAccount(state, accountId)) throw new Error("That account no longer exists.");
     void this.refreshUsage(accountId, true).catch(() => undefined);
@@ -1454,8 +1660,8 @@ export class Service {
     const info = await agentInfo(paseo, agentId);
     if (!info) throw new Error("That agent is no longer available.");
     const family = (await this.families.resolve(paseo))[info.provider];
-    if (!family) throw new Error(`${info.provider} agents don't use Claude or ChatGPT subscription accounts.`);
-    const adapter = this.adapters[family];
+    if (!family) throw new Error(`${info.provider} agents don't use ZeroSub subscription accounts.`);
+    const adapter = this.adapter(family);
     const state = await this.store.read();
     const target = accountId ? findAccount(state, accountId) : defaultAccount(state, family);
     if (!target || target.family !== family) throw new Error("That account can't be used with this agent.");
@@ -1468,13 +1674,26 @@ export class Service {
       }
       if (info.hasHistory) {
         const binding = state.bindings[agentId];
-        const current = binding?.source === "thread" ? binding.accountId : this.runningOn(state, agentId, family);
-        if (current === target.id) return emptySummary();
+        const current = state.sessions[agentId]?.accountId ??
+          (!isLive(info.status) && binding?.source === "thread" ? binding.accountId : this.runningOn(state, agentId, family));
+        if (current === target.id) {
+          if (binding?.accountId !== current) {
+            await this.store.update((draft) => {
+              draft.bindings[agentId] = { accountId: current, source: "thread", at: new Date().toISOString() };
+            });
+          }
+          return emptySummary();
+        }
+        if (current) {
+          await this.store.update((draft) => {
+            draft.bindings[agentId] = { accountId: current, source: "thread", at: new Date().toISOString() };
+          });
+        }
         const continuation = await this.continueElsewhere(
           paseo,
           agentId,
           target,
-          `you moved the work to your ChatGPT account "${target.label}"`,
+          `you moved the work to your ${FAMILY_LABEL[family]} account "${target.label}"`,
           undefined,
           "user",
         );
@@ -1518,21 +1737,26 @@ export class Service {
     const account = findAccount(state, accountId);
     if (!account) throw new Error("That account no longer exists.");
     if (account.kind === "main") {
-      throw new Error("Your CLI login can't be removed here. Sign out with `claude auth logout` or `codex logout` instead.");
+      throw new Error("Your CLI login can't be removed here. Manage it with the provider's official CLI instead.");
     }
-    if (!this.adapters[account.family].portable) {
+    const nonportableHistory = new Set<string>();
+    if (!this.adapter(account.family).portable) {
       // These conversations can't move to another ChatGPT account, so removing theirs would strand them.
       const families = await this.families.resolve(paseo);
-      const stranded = (await listAgents(paseo, false)).agents.filter(
+      const agents = (await listAgents(paseo, false)).agents;
+      for (const agent of agents) {
+        if (families[agent.provider] === account.family && agent.hasHistory) nonportableHistory.add(agent.id);
+      }
+      const stranded = agents.filter(
         (agent) =>
           families[agent.provider] === account.family &&
           agent.hasHistory &&
-          (state.bindings[agent.id]?.accountId ?? state.sessions[agent.id]?.accountId) === accountId,
+          (state.sessions[agent.id]?.accountId ?? state.bindings[agent.id]?.accountId) === accountId,
       );
       if (stranded.length > 0) {
         const one = stranded.length === 1;
         throw new Error(
-          `${stranded.length} ChatGPT conversation${one ? "" : "s"} still ${one ? "runs" : "run"} on ${account.label} and can't move to another account. Archive ${
+          `${stranded.length} ${FAMILY_LABEL[account.family]} conversation${one ? "" : "s"} still ${one ? "runs" : "run"} on ${account.label} and can't move to another account. Archive ${
             one ? "it" : "them"
           } (the work stays in your files) or continue ${one ? "it" : "them"} on another account from the account button, then remove ${account.label}.`,
         );
@@ -1544,7 +1768,11 @@ export class Service {
     await this.store.update((draft) => {
       draft.accounts = draft.accounts.filter((entry) => entry.id !== accountId);
       for (const [agentId, binding] of Object.entries(draft.bindings)) {
-        if (binding.accountId === accountId) delete draft.bindings[agentId];
+        if (binding.accountId !== accountId) continue;
+        const actual = draft.sessions[agentId]?.accountId;
+        if (actual && actual !== accountId && nonportableHistory.has(agentId)) {
+          draft.bindings[agentId] = { accountId: actual, source: "thread", at: new Date().toISOString() };
+        } else delete draft.bindings[agentId];
       }
       if (draft.defaults[account.family] === accountId) draft.defaults[account.family] = null;
     });
@@ -1563,6 +1791,10 @@ export class Service {
   }
 
   private async beginLogin(family: Family, method: LoginMethod, accountId?: string): Promise<LoginView> {
+    const capabilities = this.capabilities(family);
+    if (!capabilities.managedAccounts || !capabilities.loginMethods.includes(method)) {
+      throw new Error(`${FAMILY_LABEL[family]} doesn't support that sign-in method on this host.`);
+    }
     let availability = this.availability.get(family);
     if (!availability?.ok) {
       await this.ensureFamily(family);
@@ -1601,8 +1833,8 @@ export class Service {
     };
     this.logins.set(id, session);
     try {
-      if (home) await this.adapters[family].prepareHome(home);
-      const handle = await this.adapters[family].login(home, method);
+      if (home) await this.adapter(family).prepareHome(home);
+      const handle = await this.adapter(family).login(home, method);
       if (session.finishedAt) {
         handle.cancel();
         return session.view;
@@ -1645,7 +1877,7 @@ export class Service {
     if (session.finishedAt) return;
     if (!result.ok) return this.failLogin(session, result.message ?? "Sign-in did not finish.");
     session.view = { ...session.view, step: "verifying", message: null };
-    const adapter = this.adapters[session.family];
+    const adapter = this.adapter(session.family);
     const identity = await adapter.identity(session.home).catch(() => null);
     if (session.finishedAt) return; // Canceled while verifying.
     if (!identity?.signedIn) return this.failLogin(session, "Sign-in finished, but the account isn't signed in. Try again.");
@@ -1656,7 +1888,7 @@ export class Service {
       existing?.kind === "managed" &&
       existing.identity &&
       identity.identity &&
-      identityRelation(existing.identity, existing.email, identity.identity) === "different"
+      identityRelation(existing.identity, existing.email, identity.identity, identity.email) === "different"
     ) {
       // Signing an account back in must not quietly turn it into a different login.
       if (session.home) await adapter.logout(session.home).catch(() => undefined);
@@ -1675,7 +1907,7 @@ export class Service {
             (account) =>
               account.id !== session.accountId &&
               account.identity !== null &&
-              identityRelation(account.identity, account.email, fresh) === "same",
+              identityRelation(account.identity, account.email, fresh, identity.email) === "same",
           )
         : undefined;
     if (duplicate) {
@@ -1700,6 +1932,7 @@ export class Service {
       applyIdentity(account, identity, draft);
       account.limitedUntil = null;
       account.limitKind = null;
+      account.scopedLimits = [];
     });
     if (accountId) this.identityCheckedAt.set(accountId, Date.now());
     session.accountId = accountId;
@@ -1732,6 +1965,7 @@ function newAccount(fields: Pick<StoredAccount, "id" | "family" | "kind" | "home
     limitedUntil: null,
     limitKind: null,
     limitedAt: null,
+    scopedLimits: [],
     createdAt: new Date().toISOString(),
   };
 }
@@ -1776,6 +2010,7 @@ function toAgentInfo(agent: AgentSnapshot): AgentInfo {
     hasHistory: Boolean(agent.lastUserMessageAt),
     title: agent.title ?? null,
     continuedFrom: agent.labels?.[CONTINUED_FROM_LABEL] ?? null,
+    model: agent.model ?? agent.runtimeInfo?.model ?? null,
   };
 }
 

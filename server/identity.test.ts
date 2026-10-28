@@ -49,6 +49,18 @@ describe("identityRelation", () => {
     expect(identityRelation("org-1|alice@acme.com", null, "org-2|alice@acme.com")).toBe("different");
     expect(identityRelation("chatgpt-email|alice@acme.com|plus", "alice@acme.com", alice)).toBe("different");
   });
+
+  it("compares Antigravity subject keys and treats a changed subject as a different account", () => {
+    expect(identityRelation("antigravity|sub|alice", null, "antigravity|sub|alice")).toBe("same");
+    expect(identityRelation("antigravity|sub|alice", "same@example.com", "antigravity|sub|bob", "same@example.com")).toBe("different");
+  });
+
+  it("handles an Antigravity email-only identity gaining or losing subject metadata", () => {
+    expect(identityRelation("antigravity|email|alice@example.com", "alice@example.com", "antigravity|sub|alice", "Alice@Example.com")).toBe("same");
+    expect(identityRelation("antigravity|sub|alice", "Alice@Example.com", "antigravity|email|alice@example.com")).toBe("same");
+    expect(identityRelation("antigravity|email|alice@example.com", "alice@example.com", "antigravity|sub|bob", "bob@example.com")).toBe("different");
+    expect(identityRelation("antigravity|email|alice@example.com", "alice@example.com", "antigravity|sub|unknown")).toBe("unknown");
+  });
 });
 
 // ---------------------------------------------------------------- sign-in flow
@@ -91,6 +103,7 @@ function stored(id: string, email: string, identity: string, kind: "main" | "man
     limitedUntil: null,
     limitKind: null,
     limitedAt: null,
+    scopedLimits: [],
     createdAt: "2026-10-01T00:00:00.000Z",
   };
 }

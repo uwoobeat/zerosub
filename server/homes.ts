@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join, sep } from "node:path";
 import { homesDir, mainClaudeDir, mainClaudeGlobalConfig, mainCodexHome } from "./paths";
@@ -349,4 +349,39 @@ export async function codexSqliteHome(): Promise<string | null> {
   // A `sqlite_home` in the (shared) config.toml already applies to every account.
   if (/^\s*sqlite_home\s*=/m.test(config)) return null;
   return mainCodexHome();
+}
+
+// --------------------------------------------------------------------------- Antigravity
+
+/**
+ * Directories a managed Antigravity home uses. The adapter points XDG config/data/cache at these
+ * names, so they stay private to the account instead of falling back to the OS login's XDG roots.
+ */
+const ANTIGRAVITY_DIRECTORIES = [
+  [".gemini"],
+  [".gemini", "antigravity-cli"],
+  ["config"],
+  ["data"],
+  ["cache"],
+] as const;
+
+/** Creates a directory private to this home without following a symlink out of it. */
+async function ensurePrivateDirectory(path: string): Promise<void> {
+  const entry = await lstat(path).catch(() => null);
+  if (entry?.isSymbolicLink()) {
+    throw new Error(`${path} is a symlink; refusing to prepare an Antigravity home through it`);
+  }
+  if (entry && !entry.isDirectory()) throw new Error(`${path} is not a directory`);
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  await chmod(path, 0o700);
+}
+
+/**
+ * Prepares a managed Antigravity home. It starts empty: the OS login's credential file, Keychain
+ * entries, settings and history are deliberately neither shared nor copied. Only the private
+ * directories the official CLI writes into are created, so its own login command owns the account.
+ */
+export async function prepareAntigravityHome(home: string): Promise<void> {
+  await ensurePrivateDirectory(home);
+  for (const parts of ANTIGRAVITY_DIRECTORIES) await ensurePrivateDirectory(join(home, ...parts));
 }

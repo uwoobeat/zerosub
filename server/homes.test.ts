@@ -1,8 +1,8 @@
-import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mergeShared, prepareClaudeHome, prepareCodexHome, removeHome } from "./homes";
+import { mergeShared, prepareAntigravityHome, prepareClaudeHome, prepareCodexHome, removeHome } from "./homes";
 
 let root: string;
 const saved = {
@@ -155,6 +155,39 @@ describe("prepareCodexHome", () => {
   });
 });
 
+describe("prepareAntigravityHome", () => {
+  it("creates private empty directories without sharing or copying the OS login", async () => {
+    const main = join(root, "main");
+    await mkdir(join(main, ".gemini", "antigravity-cli"), { recursive: true });
+    await writeFile(join(main, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "os-login");
+    const home = join(root, "homes", "antigravity-a");
+
+    await prepareAntigravityHome(home);
+
+    for (const parts of [[], [".gemini"], [".gemini", "antigravity-cli"], ["config"], ["data"], ["cache"]]) {
+      const entry = await stat(join(home, ...parts));
+      expect(entry.isDirectory()).toBe(true);
+      expect(entry.mode & 0o777).toBe(0o700);
+    }
+    expect(await lstat(join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")).catch(() => null)).toBeNull();
+    for (const name of await readdir(home)) {
+      expect((await lstat(join(home, name))).isSymbolicLink()).toBe(false);
+    }
+    expect(await readFile(join(main, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "utf8")).toBe("os-login");
+  });
+
+  it("refuses to prepare through a symlinked directory", async () => {
+    const outside = join(root, "outside");
+    const home = join(root, "homes", "antigravity-b");
+    await mkdir(outside, { recursive: true });
+    await mkdir(home, { recursive: true });
+    await symlink(outside, join(home, ".gemini"));
+
+    await expect(prepareAntigravityHome(home)).rejects.toThrow(/symlink/);
+    expect(await lstat(join(outside, "antigravity-cli")).catch(() => null)).toBeNull();
+  });
+});
+
 describe("removeHome", () => {
   it("deletes the home without touching what its links point at", async () => {
     process.env.PASEO_HOME = root;
@@ -178,6 +211,21 @@ describe("removeHome", () => {
     await mkdir(outside, { recursive: true });
     await removeHome(outside);
     expect((await lstat(outside)).isDirectory()).toBe(true);
+  });
+
+  it("removes an Antigravity home without touching the OS login", async () => {
+    process.env.PASEO_HOME = root;
+    const main = join(root, "main", ".gemini", "antigravity-cli");
+    const home = join(root, "zerosub", "homes", "antigravity-x");
+    await mkdir(main, { recursive: true });
+    await writeFile(join(main, "antigravity-oauth-token"), "os-login");
+    await prepareAntigravityHome(home);
+    await writeFile(join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "managed");
+
+    await removeHome(home);
+
+    expect(await lstat(home).catch(() => null)).toBeNull();
+    expect(await readFile(join(main, "antigravity-oauth-token"), "utf8")).toBe("os-login");
   });
 });
 

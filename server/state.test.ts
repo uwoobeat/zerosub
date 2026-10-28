@@ -2,7 +2,7 @@ import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { StateStore, salvageState } from "./state";
+import { MAIN_ACCOUNT_ID, StateStore, StoredAccountSchema, salvageState } from "./state";
 
 let dir: string;
 
@@ -59,5 +59,57 @@ describe("StateStore", () => {
     await expect(store.update(() => undefined)).rejects.toThrow();
     await chmod(path, 0o600);
     expect(JSON.parse(await readFile(path, "utf8")).accounts).toHaveLength(1);
+  });
+});
+
+describe("scoped limits", () => {
+  it("adds an empty scope list to older accounts and keeps the account-wide limit", () => {
+    const parsed = StoredAccountSchema.parse({ ...account, limitedUntil: "2026-09-23T14:00:00Z", limitKind: "window" });
+    expect(parsed.scopedLimits).toEqual([]);
+    expect(parsed.limitedUntil).toBe("2026-09-23T14:00:00Z");
+    expect(parsed.limitKind).toBe("window");
+  });
+
+  it("drops a malformed scope list without dropping the account", () => {
+    const parsed = StoredAccountSchema.parse({ ...account, scopedLimits: [{ scopeId: 7 }] });
+    expect(parsed.scopedLimits).toEqual([]);
+    const { state, dropped } = salvageState({ accounts: [{ ...account, scopedLimits: [{ scopeId: 7 }] }] });
+    expect(dropped).toBe(false);
+    expect(state.accounts[0]?.limitedUntil).toBeNull();
+    expect(state.accounts[0]?.scopedLimits).toEqual([]);
+  });
+
+  it("persists per-scope limits atomically next to the account-wide limit", async () => {
+    const path = join(dir, "state.json");
+    await writeFile(
+      path,
+      JSON.stringify({ accounts: [{ ...account, id: "antigravity-main", family: "antigravity", limitedUntil: "2026-09-23T20:00:00Z" }] }),
+    );
+    const store = new StateStore(path);
+    await store.update((draft) => {
+      draft.accounts[0]?.scopedLimits.push({
+        scopeId: "gemini",
+        limitedUntil: "2026-09-23T14:00:00Z",
+        limitedAt: "2026-09-23T09:00:00Z",
+        kind: "window",
+      });
+    });
+
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    expect(saved.accounts[0].limitedUntil).toBe("2026-09-23T20:00:00Z");
+    expect(saved.accounts[0].scopedLimits).toEqual([
+      {
+        scopeId: "gemini",
+        limitedUntil: "2026-09-23T14:00:00Z",
+        limitedAt: "2026-09-23T09:00:00Z",
+        kind: "window",
+      },
+    ]);
+    expect((await readdir(dir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("defaults the Antigravity main account id and default slot", async () => {
+    expect(MAIN_ACCOUNT_ID.antigravity).toBe("antigravity-main");
+    expect((await new StateStore(join(dir, "state.json")).read()).defaults.antigravity).toBeNull();
   });
 });

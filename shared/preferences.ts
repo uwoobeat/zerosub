@@ -12,6 +12,11 @@ export const preferences = defineSettings({
   schema: z.object({
     /** Move an agent to another account of the same provider when its account hits a usage limit. */
     autoSwitch: z.boolean().default(true),
+    /**
+     * Move Antigravity agents between accounts automatically. Off by default: account isolation on
+     * this provider has only been verified with the same account so far, so routing stays opt-in.
+     */
+    antigravityAutoSwitch: z.boolean().default(false),
     /** After an automatic switch, send a follow-up so the interrupted turn keeps going. */
     autoContinue: z.boolean().default(true),
     continuePrompt: z.string().trim().min(1).max(500).default(DEFAULT_CONTINUE_PROMPT),

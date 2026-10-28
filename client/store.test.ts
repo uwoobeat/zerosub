@@ -10,6 +10,7 @@ function view(overrides: Partial<StateView> = {}): StateView {
     agents: [],
     logins: [],
     providers: {},
+    capabilities: {},
     canReopen: false,
     browserSignIn: true,
     showComposerPill: false,
