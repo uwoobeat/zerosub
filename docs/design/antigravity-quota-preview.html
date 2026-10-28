@@ -1,0 +1,166 @@
+<div id="zerosub-quota-design" aria-label="ZeroSub model quota design">
+  <style>
+    #zerosub-quota-design {
+      --zs-bg: light-dark(#f7f8fa, #111418);
+      --zs-panel: light-dark(#ffffff, #1b2027);
+      --zs-soft: light-dark(#f0f3f7, #252c35);
+      --zs-text: light-dark(#18212d, #eef2f7);
+      --zs-muted: light-dark(#586576, #b1bdcc);
+      --zs-line: light-dark(#dce2eb, #384350);
+      --zs-accent: light-dark(#315ec7, #91b3ff);
+      --zs-accent-bg: light-dark(#edf2ff, #243550);
+      --zs-warn: light-dark(#a43b16, #ffaf8d);
+      --zs-warn-bg: light-dark(#fff1e8, #452b21);
+      color: var(--zs-text);
+      font: 400 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      width: 100%;
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    #zerosub-quota-design * { box-sizing: border-box; }
+    #zerosub-quota-design button, #zerosub-quota-design select { font: inherit; }
+    #zerosub-quota-design button { cursor: pointer; }
+    #zerosub-quota-design .zs-surface { background: var(--zs-bg); border: 1px solid var(--zs-line); border-radius: 16px; padding: 20px; }
+    #zerosub-quota-design .zs-toolbar, #zerosub-quota-design .zs-heading, #zerosub-quota-design .zs-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    #zerosub-quota-design .zs-toolbar { justify-content: space-between; margin-bottom: 18px; }
+    #zerosub-quota-design .zs-title { font-size: 18px; font-weight: 500; margin: 0; }
+    #zerosub-quota-design .zs-muted { color: var(--zs-muted); }
+    #zerosub-quota-design .zs-small { font-size: 12px; }
+    #zerosub-quota-design .zs-preview { color: var(--zs-muted); font-size: 12px; }
+    #zerosub-quota-design .zs-account { background: var(--zs-panel); border: 1px solid var(--zs-line); border-radius: 12px; padding: 18px; }
+    #zerosub-quota-design .zs-account-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+    #zerosub-quota-design .zs-account-name { margin: 0; font-size: 16px; font-weight: 500; }
+    #zerosub-quota-design .zs-tag { color: var(--zs-muted); background: var(--zs-soft); border-radius: 5px; padding: 3px 7px; font-size: 12px; }
+    #zerosub-quota-design .zs-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 18px 0 12px; }
+    #zerosub-quota-design select { color: var(--zs-text); background: var(--zs-panel); border: 1px solid var(--zs-line); border-radius: 7px; min-height: 38px; max-width: 100%; padding: 7px 30px 7px 9px; }
+    #zerosub-quota-design .zs-summary { background: var(--zs-accent-bg); border-radius: 8px; padding: 10px 12px; display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; margin-bottom: 14px; }
+    #zerosub-quota-design .zs-summary strong { font-weight: 500; }
+    #zerosub-quota-design .zs-notice { color: var(--zs-warn); background: var(--zs-warn-bg); border-radius: 7px; padding: 9px 11px; margin-bottom: 14px; font-size: 12px; }
+    #zerosub-quota-design .zs-group { padding: 14px 0; border-top: 1px solid var(--zs-line); }
+    #zerosub-quota-design .zs-group-name { margin: 0; font-size: 14px; font-weight: 500; }
+    #zerosub-quota-design .zs-current { color: var(--zs-accent); font-size: 12px; }
+    #zerosub-quota-design .zs-context { margin: 3px 0 12px; color: var(--zs-muted); font-size: 12px; }
+    #zerosub-quota-design .zs-buckets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 22px; }
+    #zerosub-quota-design .zs-buckets.zs-single { grid-template-columns: 1fr; }
+    #zerosub-quota-design .zs-bucket-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    #zerosub-quota-design .zs-percent { font-variant-numeric: tabular-nums; font-weight: 500; }
+    #zerosub-quota-design .zs-track { height: 5px; background: var(--zs-soft); border-radius: 4px; margin: 7px 0 6px; overflow: hidden; }
+    #zerosub-quota-design .zs-fill { height: 100%; background: var(--zs-accent); border-radius: inherit; }
+    #zerosub-quota-design .zs-exhausted .zs-fill { background: var(--zs-warn); }
+    #zerosub-quota-design .zs-exhausted .zs-percent { color: var(--zs-warn); }
+    #zerosub-quota-design .zs-reset { color: var(--zs-muted); font-size: 12px; }
+    #zerosub-quota-design .zs-footer { border-top: 1px solid var(--zs-line); margin-top: 6px; padding-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    #zerosub-quota-design .zs-refresh, #zerosub-quota-design .zs-pill { color: var(--zs-text); background: var(--zs-panel); border: 1px solid var(--zs-line); border-radius: 7px; padding: 8px 11px; min-height: 38px; display: inline-flex; align-items: center; gap: 7px; }
+    #zerosub-quota-design .zs-agent { margin-top: 18px; }
+    #zerosub-quota-design .zs-agent-label { margin: 0 0 8px; color: var(--zs-muted); font-size: 12px; }
+    #zerosub-quota-design .zs-composer { border: 1px solid var(--zs-line); border-radius: 10px; background: var(--zs-panel); padding: 12px; }
+    #zerosub-quota-design .zs-placeholder { color: var(--zs-muted); margin: 12px 0 0; }
+    #zerosub-quota-design .zs-popover { background: var(--zs-soft); padding: 10px; border-radius: 7px; margin-top: 9px; font-size: 12px; }
+    #zerosub-quota-design [hidden] { display: none !important; }
+    #zerosub-quota-design.zs-compact { max-width: 360px; }
+    #zerosub-quota-design.zs-stacked .zs-buckets { grid-template-columns: 1fr; }
+    #zerosub-quota-design.zs-compact .zs-surface { padding: 12px; }
+    #zerosub-quota-design.zs-compact .zs-account { padding: 13px; }
+    #zerosub-quota-design.zs-compact .zs-buckets { grid-template-columns: 1fr; }
+    @media (max-width: 480px) {
+      #zerosub-quota-design .zs-surface { padding: 12px; }
+      #zerosub-quota-design .zs-account { padding: 13px; }
+      #zerosub-quota-design .zs-buckets { grid-template-columns: 1fr; }
+      #zerosub-quota-design select { width: 100%; font-size: 16px; }
+      #zerosub-quota-design button { min-height: 44px; }
+    }
+  </style>
+  <section class="zs-surface" aria-label="Accounts screen design preview">
+    <header class="zs-toolbar">
+      <div><h2 class="zs-title">Accounts <span class="zs-muted">ZeroSub</span></h2><span class="zs-muted zs-small">This host</span></div>
+      <span class="zs-preview">Design preview · example data</span>
+    </header>
+    <article class="zs-account" aria-label="Antigravity CLI login quotas">
+      <header class="zs-account-top">
+        <div><h3 class="zs-account-name">Antigravity</h3><span class="zs-muted zs-small">CLI login</span></div>
+        <span class="zs-tag">Default</span>
+      </header>
+      <div class="zs-filter">
+        <label class="zs-muted zs-small" for="zs-model-context">Model context</label>
+        <select id="zs-model-context">
+          <option value="argon">Gemini 4 Argon</option>
+          <option value="gemini">Gemini Flash / Pro</option>
+          <option value="partner">Claude / GPT</option>
+        </select>
+      </div>
+      <div class="zs-summary" aria-live="polite"><strong id="zs-model-summary"></strong><span id="zs-model-status"></span></div>
+      <div id="zs-data-notice" class="zs-notice" role="status" hidden></div>
+      <div id="zs-group-list"></div>
+      <footer class="zs-footer">
+        <span id="zs-checked" class="zs-muted zs-small">Checked just now</span>
+        <button class="zs-refresh" id="zs-refresh-preview" type="button"><i data-lucide="refresh-cw" aria-hidden="true"></i>Refresh preview</button>
+      </footer>
+    </article>
+    <section class="zs-agent" aria-label="Agent composer preview">
+      <p class="zs-agent-label">In this agent · selected model</p>
+      <div class="zs-composer">
+        <button id="zs-agent-pill" class="zs-pill" type="button" aria-expanded="false" aria-controls="zs-pill-detail"></button>
+        <div id="zs-pill-detail" class="zs-popover" hidden></div>
+        <p class="zs-placeholder">Message your agent…</p>
+      </div>
+    </section>
+  </section>
+  <script>
+    (() => {
+      const root = document.getElementById("zerosub-quota-design");
+      const ui = { compact: false, windows: "paired", state: "sample" };
+      let selected = "argon";
+      const groups = [
+        { id: "argon", name: "Gemini 4 Argon", context: "Separate pool on this plan · all Argon effort levels", buckets: [{ label: "Weekly", used: 48.67765307426453, reset: "Resets in 9h 1m" }] },
+        { id: "gemini", name: "Gemini Models", context: "Shared pool · Gemini Flash and Pro", buckets: [{ label: "5-hour", used: 0, reset: "Reset time passed · refresh to verify" }, { label: "Weekly", used: 0, reset: "Resets in 6d 15h" }] },
+        { id: "partner", name: "Claude and GPT", context: "Shared pool · Opus, Sonnet and GPT-OSS", buckets: [{ label: "5-hour", used: 0, reset: "Reset time passed · refresh to verify" }, { label: "Weekly", used: 0, reset: "Resets in 6d 15h" }] }
+      ];
+      const modelSelect = root.querySelector("#zs-model-context");
+      const percent = value => value > 0 && value < 1 ? "<1%" : `${Math.round(value)}%`;
+      const reading = (group, bucket) => ui.state === "exhausted" && group.id === "argon" ? 100 : bucket.used;
+      function render() {
+        root.classList.toggle("zs-compact", ui.compact);
+        root.classList.toggle("zs-stacked", ui.windows === "stacked");
+        const unknown = ui.state === "unknown";
+        const current = groups.find(group => group.id === selected);
+        const peak = Math.max(...current.buckets.map(bucket => reading(current, bucket)));
+        const limited = !unknown && peak === 100;
+        root.querySelector("#zs-model-summary").textContent = `${current.name} · ${unknown ? "Usage unavailable" : percent(peak) + " used"}`;
+        root.querySelector("#zs-model-status").textContent = unknown ? "Check required" : ui.state === "stale" ? "Cached · availability unverified" : limited ? "Limit reached for this model" : "Available for this model";
+        const notice = root.querySelector("#zs-data-notice");
+        notice.hidden = !["stale", "unknown", "exhausted"].includes(ui.state);
+        notice.textContent = ui.state === "stale" ? "Refresh failed · showing the last checked values" : ui.state === "unknown" ? "Quota could not be read · availability is unknown" : "Argon limit reached · other model groups remain available";
+        root.querySelector("#zs-group-list").innerHTML = groups.map(group => `<section class="zs-group" aria-label="${group.name}">
+          <div class="zs-row"><h4 class="zs-group-name">${group.name}</h4>${group.id === selected ? '<span class="zs-current">Selected model</span>' : ""}</div>
+          <p class="zs-context">${group.context}</p>
+          <div class="zs-buckets ${group.buckets.length === 1 ? "zs-single" : ""}">${group.buckets.map(bucket => {
+            const used = reading(group, bucket);
+            return `<div class="${used === 100 && !unknown ? "zs-exhausted" : ""}">
+              <div class="zs-bucket-top"><span>${bucket.label}</span><span class="zs-percent">${unknown ? "—" : percent(used) + " used"}</span></div>
+              <div class="zs-track" role="progressbar" aria-label="${group.name} ${bucket.label} usage${unknown ? " unavailable" : ""}" ${unknown ? "" : `aria-valuenow="${used.toFixed(2)}" aria-valuemin="0" aria-valuemax="100"`}><div class="zs-fill" style="width:${unknown ? 0 : used}%"></div></div>
+              <div class="zs-reset">${unknown ? "Reset time unavailable" : used === 100 ? "Resets in 9h 1m" : bucket.reset}</div>
+            </div>`;
+          }).join("")}</div>
+        </section>`).join("");
+        root.querySelector("#zs-checked").textContent = ui.state === "stale" ? "Last checked 14m ago · cached" : unknown ? "No successful reading" : "Checked just now";
+        root.querySelector("#zs-agent-pill").textContent = `CLI login · ${current.name} · ${unknown ? "unknown" : percent(peak) + " used"}${ui.state === "stale" ? " · cached" : ""}`;
+        root.querySelector("#zs-pill-detail").textContent = `${current.name} · ${unknown ? "Quota unavailable" : limited ? "Weekly limit reached. Other groups are available." : "Quota applies to this model. Shared pools are counted once."}`;
+      }
+      modelSelect.addEventListener("change", event => { selected = event.target.value; render(); });
+      root.querySelector("#zs-refresh-preview").addEventListener("click", () => { ui.state = "sample"; render(); });
+      const pill = root.querySelector("#zs-agent-pill");
+      pill.addEventListener("click", () => {
+        const expanded = pill.getAttribute("aria-expanded") !== "true";
+        pill.setAttribute("aria-expanded", String(expanded));
+        root.querySelector("#zs-pill-detail").hidden = !expanded;
+      });
+      render();
+      if (globalThis.Tweak) {
+        const tweak = new Tweak({ container: root, onChange: render });
+        tweak.addToggle(ui, "compact", { label: "Compact layout" });
+        tweak.addSelect(ui, "windows", { label: "Window layout", options: [{ label: "Paired", value: "paired" }, { label: "Stacked", value: "stacked" }] });
+        tweak.addSelect(ui, "state", { label: "Quota state", options: [{ label: "Observed sample", value: "sample" }, { label: "Argon exhausted", value: "exhausted" }, { label: "Cached after error", value: "stale" }, { label: "Unknown", value: "unknown" }] });
+      }
+    })();
+  </script>
+</div>
