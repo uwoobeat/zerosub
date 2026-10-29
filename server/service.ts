@@ -32,6 +32,7 @@ import {
   type UsageRead,
 } from "./adapter";
 import { bringsOwnAuth, FamilyResolver } from "./families";
+import { AntigravityContinuations } from "./antigravity-continuations";
 import { CodexContinuations } from "./continuations";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
@@ -140,6 +141,7 @@ function emptySummary(): ReopenSummary {
 
 export class Service {
   private readonly continuations: CodexContinuations;
+  private readonly antigravityContinuations: AntigravityContinuations;
   private paseo: PaseoApi | null = null;
   private prefs: Preferences = DEFAULT_PREFERENCES;
   private readonly usage = new Map<string, Usage>();
@@ -184,6 +186,7 @@ export class Service {
     private readonly reopener = new Reopener(),
   ) {
     this.continuations = new CodexContinuations(store);
+    this.antigravityContinuations = new AntigravityContinuations(store);
   }
 
   private adapter(family: Family): FamilyAdapter {
@@ -272,7 +275,12 @@ export class Service {
         main.signedIn = false;
         draft.accounts.unshift(main);
       }
-      if (identity) applyIdentity(main, identity, draft);
+      if (identity) {
+        if (reauthenticated(main, identity)) {
+          draft.antigravityAccountGenerations[main.id] = (draft.antigravityAccountGenerations[main.id] ?? 0) + 1;
+        }
+        applyIdentity(main, identity, draft);
+      }
       if (!main.label) main.label = `${FAMILY_LABEL[family]} (CLI login)`;
     });
   }
@@ -319,7 +327,12 @@ export class Service {
     if (!identity) return;
     await this.store.update((draft) => {
       const target = findAccount(draft, accountId);
-      if (target) applyIdentity(target, identity, draft);
+      if (target) {
+        if (reauthenticated(target, identity)) {
+          draft.antigravityAccountGenerations[accountId] = (draft.antigravityAccountGenerations[accountId] ?? 0) + 1;
+        }
+        applyIdentity(target, identity, draft);
+      }
     });
   }
 
@@ -333,9 +346,28 @@ export class Service {
     const known = new Set(agents.map((agent) => agent.id));
     const state = await this.store.read();
     const old = (at: string) => now - (Date.parse(at) || 0) > PRUNE_MS;
-    const staleSessions = Object.entries(state.sessions).filter(([id, session]) => !known.has(id) && old(session.openedAt));
-    const staleBindings = Object.entries(state.bindings).filter(([id, binding]) => !known.has(id) && old(binding.at));
+    const reservedAntigravity = new Set(Object.values(state.antigravityContinuations).flatMap((chain) => [
+      ...(chain.pending ? [chain.pending.agentId] : []),
+      ...Object.entries(chain.members).filter(([, member]) => member.unstarted).map(([id]) => id),
+    ]));
+    const staleSessionCandidates = Object.entries(state.sessions).filter(([id, session]) =>
+      !known.has(id) && !reservedAntigravity.has(id) && old(session.openedAt),
+    );
+    const staleBindingCandidates = Object.entries(state.bindings).filter(([id, binding]) =>
+      !known.has(id) && !reservedAntigravity.has(id) && old(binding.at),
+    );
+    const missing = new Set<string>();
+    for (const id of new Set([...staleSessionCandidates, ...staleBindingCandidates].map(([id]) => id))) {
+      try {
+        if (!await paseo.agents.ref(id).refresh()) missing.add(id);
+      } catch {
+        // Directory filtering and transient refresh failures do not prove that a tab was deleted.
+      }
+    }
+    const staleSessions = staleSessionCandidates.filter(([id]) => missing.has(id));
+    const staleBindings = staleBindingCandidates.filter(([id]) => missing.has(id));
     const active = new Set(agents.filter((agent) => !agent.archived).map((agent) => agent.id));
+    await this.antigravityContinuations.prune(paseo, known);
     // A hand-off that may have sent its prompt stays on record while its tab could come back. A
     // failed creation sent nothing, so it doesn't keep the task's record alive.
     const unsettled = (pending: ContinuationChain["pending"]) => pending?.stage === "sending" && known.has(pending.agentId);
@@ -449,7 +481,7 @@ export class Service {
       reason: request.reason,
       now,
       autoSwitch: this.autoSwitchFor(family),
-      balanceNewAgents: this.prefs.balanceNewAgents && (family !== "antigravity" || this.autoSwitchFor(family)),
+      balanceNewAgents: this.prefs.balanceNewAgents && family !== "antigravity",
       portable: adapter.portable,
       usageOf: (id) => this.usage.get(id),
       model,
@@ -486,13 +518,26 @@ export class Service {
     const seenBinding = state.bindings[request.agentId]?.accountId;
     const bindingChanged = decision.bind !== null && seenBinding !== decision.bind.accountId;
     const sessionChanged = interactive && state.sessions[request.agentId]?.accountId !== account.id;
-    if (bindingChanged || sessionChanged) {
+    const previousSession = state.sessions[request.agentId];
+    const sessionNeedsUpdate = interactive && (sessionChanged || (family === "antigravity" && (
+      previousSession?.authGeneration !== (state.antigravityAccountGenerations[account.id] ?? 0) ||
+      (previousSession?.authHome ?? null) !== account.home
+    )));
+    if (bindingChanged || sessionNeedsUpdate) {
       await this.store.update((draft) => {
         // Don't overwrite a choice the user made while this decision was being taken.
         if (decision.bind && bindingChanged && draft.bindings[request.agentId]?.accountId === seenBinding) {
           draft.bindings[request.agentId] = decision.bind;
         }
-        if (interactive) draft.sessions[request.agentId] = { accountId: account.id, family, openedAt: new Date(now).toISOString() };
+        if (interactive) draft.sessions[request.agentId] = {
+          accountId: account.id,
+          family,
+          openedAt: new Date(now).toISOString(),
+          ...(family === "antigravity" ? {
+            authGeneration: draft.antigravityAccountGenerations[account.id] ?? 0,
+            authHome: account.home,
+          } : {}),
+        };
       });
     }
     // A fresh session already runs on the routed account, so any pending switch is done.
@@ -1231,6 +1276,7 @@ export class Service {
     source: "auto" | "user",
   ): Promise<Continuation> {
     if (target.family === "codex") return this.continuations.continue(paseo, agentId, target, why, source);
+    if (target.family === "antigravity") return this.antigravityContinuations.continue(paseo, agentId, target, why);
     let lock = this.continuationLocks.get(agentId);
     if (!lock) this.continuationLocks.set(agentId, (lock = new Mutex()));
     return lock.run(() => this.continueElsewhereOnce(paseo, agentId, target, why, timeline, source));
@@ -1809,7 +1855,8 @@ export class Service {
         const binding = state.bindings[agentId];
         const current = state.sessions[agentId]?.accountId ??
           (!isLive(info.status) && binding?.source === "thread" ? binding.accountId : this.runningOn(state, agentId, family));
-        if (current === target.id) {
+        const reauthenticatedAntigravity = family === "antigravity" && this.antigravityContinuations.needsFreshTab(state, agentId, target.id);
+        if (current === target.id && !reauthenticatedAntigravity) {
           if (binding?.accountId !== current) {
             await this.store.update((draft) => {
               draft.bindings[agentId] = { accountId: current, source: "thread", at: new Date().toISOString() };
@@ -2059,11 +2106,15 @@ export class Service {
     let accountId = session.accountId;
     await this.store.update((draft) => {
       let account = findAccount(draft, accountId);
+      const existing = account;
       if (!account) {
         // A managed account's ID matches its home's folder name (collectOrphanHomes relies on it).
         accountId = `${session.family}-${session.id}`;
         account = newAccount({ id: accountId, family: session.family, kind: "managed", home: session.home });
         draft.accounts.push(account);
+      }
+      if (session.family === "antigravity" && existing) {
+        draft.antigravityAccountGenerations[account.id] = (draft.antigravityAccountGenerations[account.id] ?? 0) + 1;
       }
       applyIdentity(account, identity, draft);
       account.limitedUntil = null;
@@ -2117,6 +2168,14 @@ function applyIdentity(account: StoredAccount, identity: Identity, state: Stored
     account.label = suggestLabel(account, state);
     account.autoLabel = true;
   }
+}
+
+/** A known sign-out/sign-in cycle or changed recorded identity invalidates prior AGY tabs. */
+function reauthenticated(account: StoredAccount, identity: Identity): boolean {
+  if (account.family !== "antigravity" || !identity.signedIn) return false;
+  if (!account.signedIn) return true;
+  return Boolean(account.identity && identity.identity && account.identity !== identity.identity) ||
+    Boolean(account.email && identity.email && account.email.toLowerCase() !== identity.email.toLowerCase());
 }
 
 /** "work" for work@acme.com, or the full address when another account would read the same. */

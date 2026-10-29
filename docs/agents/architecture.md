@@ -34,6 +34,7 @@ RPC·view model·설정·타임라인은 Zod 기반 공유 계약이다. 독립 
 | 세션 재시작·전환 횟수 제한 | [server/reopen.ts](../../server/reopen.ts), [server/switch-guard.ts](../../server/switch-guard.ts) |
 | 새 대화로 인계·권한 대응 | [server/handoff.ts](../../server/handoff.ts), [server/modes.ts](../../server/modes.ts) |
 | Codex 계정별 작업 탭 재사용·전달 중복 방지 | [server/continuations.ts](../../server/continuations.ts) |
+| Antigravity 수동 작업 탭 재사용·증분 인계 | [server/antigravity-continuations.ts](../../server/antigravity-continuations.ts) |
 | CLI 탐색·실행·헤드리스 판별 | `server/binaries.ts`, `server/process.ts`, `server/machine.ts` |
 | 계정 화면·로그인 | `client/accounts-surface.tsx`, `client/add-account.tsx` |
 | 공용 상태 폴링 | [client/store.ts](../../client/store.ts) |
@@ -50,17 +51,24 @@ RPC·view model·설정·타임라인은 Zod 기반 공유 계약이다. 독립 
 클라이언트의 `ZeroSubStore`는 상태를 공유한다.
 
 턴 종료 → adapter의 공식 한도·로그아웃 알림 감지 → 실제 실행 계정 확인 → 계정별 직렬화 →
-사용 가능한 계정 선택 → Claude 재오픈 또는 Codex continuation.
+사용 가능한 계정 선택 → Claude 재오픈 또는 Codex/Antigravity continuation.
 Paseo 0.13의 빈 hook timeline은 시간 제한 안에서 해당 턴의 행만 다시 읽어 한도를 판단한다.
 Codex continuation은 작업·계정별 탭을 재사용하고 아직 전달되지 않은 대화만 넘긴다.
-Antigravity는 별도 잠금과 기존 continuation 검사를 유지하며 Codex 탭 체인에 등록하지 않는다.
+Antigravity는 별도 작업 체인에서 수동 계정 전환만 처리하며, 계정 인증 세대와 provider/model/
+mode/thinking/features가 같은 탭을 재사용하고 Paseo timeline의 검증된 `epoch/seq` 증분을 인계한다.
+SDK가 요청한 canonical projection을 보장하지 않으므로 cursor를 가로지르는 projected 항목은 거부한다.
+Codex와 Antigravity 체인을 서로 등록하지 않는다. 대상 탭의 기준 이력이 사라진 경우에만
+다른 멤버의 검증된 전체 이력에서 재구성한다. 필요한 멤버 timeline을 읽지 못하거나 epoch가
+바뀌고 기준 문맥도 확인할 수 없으면 전환을 중단한다.
 대체 계정이 없으면 설정·조건에 따라 banked reset, 다른 제공자 fork, 중단 안내로 이어진다.
 라우팅의 목표 계정과 실행 중 세션의 계정은 전환 완료 전까지 다를 수 있다.
 
 ## 데이터와 인증 경계
 
 `PASEO_HOME`의 기본값은 `~/.paseo`다. ZeroSub 데이터는 그 아래 `zerosub/`에 둔다.
-`state.json`은 계정 메타데이터·기본 계정·binding·세션·Codex continuation 체인의 타임라인 위치,
+`state.json`은 계정 메타데이터·기본 계정·binding·세션·Codex/Antigravity continuation 체인의
+타임라인 위치와 Antigravity 계정별 관측한 인증 세대를 저장한다. 전송 영수증이 불확실한 동안에는
+동일 message ID 재시도를 위해 정확한 인계문을 임시 저장하며, 전달이 확정되면 pending에서 지운다.
 `usage.json`은 사용량 캐시,
 `homes/`는 관리 계정의 인증 홈이다. CLI 자신의 로그인은 `kind: "main"`, `home: null`로 표현한다.
 

@@ -55,6 +55,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { input, output } from "zod";
 import { CodexContinuations } from "./continuations";
+import { AntigravityContinuations } from "./antigravity-continuations";
 import { StateStore, StoredAccountSchema, type StoredAccount } from "./state";
 
 type Outbound = input<typeof SessionOutboundMessageSchema>;
@@ -83,7 +84,7 @@ class FakeDaemon {
   private clock = 0;
   private serial = 0;
 
-  constructor(readonly cwd: string) {}
+  constructor(readonly cwd: string, readonly provider = "codex") {}
 
   readonly transportFactory: DaemonTransportFactory = () => this.open();
 
@@ -109,7 +110,7 @@ class FakeDaemon {
     const at = this.now();
     const agent: FakeAgent = {
       snapshot: {
-        id, provider: "codex", cwd: this.cwd, workspaceId: WORKSPACE_ID, model: "synthetic-model",
+        id, provider: this.provider, cwd: this.cwd, workspaceId: WORKSPACE_ID, model: "synthetic-model",
         features: [{ type: "toggle", id: "fast_mode", label: "Fast", value: true }], thinkingOptionId: "high",
         createdAt: at, updatedAt: at, lastUserMessageAt: null, status: "idle", activeTurn: null,
         capabilities: {
@@ -423,6 +424,58 @@ async function setup() {
   return { path, daemon, account, plugin, expectCleanWire };
 }
 
+async function setupAntigravity() {
+  const path = join(dir, "state.json");
+  const store = new StateStore(path);
+  const accounts = ["a", "b"].map((id) => StoredAccountSchema.parse({
+    id, family: "antigravity", label: id.toUpperCase(), kind: "managed", home: join(dir, id),
+    identity: null, email: null, createdAt: "2026-10-01T00:00:00Z",
+  }));
+  await store.update((draft) => {
+    draft.accounts = accounts;
+    draft.defaults.antigravity = "a";
+    draft.bindings[ROOT] = { accountId: "a", source: "thread", at: "now" };
+    draft.sessions[ROOT] = { accountId: "a", family: "antigravity", openedAt: "now", authGeneration: 0, authHome: accounts[0]!.home };
+  });
+  const daemon = new FakeDaemon(dir, "antigravity");
+  daemon.addAgent(ROOT);
+  daemon.userTurn(ROOT, "Repair the build; preserve the public API.", "The parser has been repaired; tests still need work.");
+  const account = (id: string): StoredAccount => accounts.find((entry) => entry.id === id)!;
+
+  async function plugin(options: { reconnect?: boolean } = {}) {
+    const problems: string[] = [];
+    const logger: NonNullable<DaemonClientConfig["logger"]> = {
+      debug: () => {}, info: () => {},
+      warn: (obj, msg) => problems.push(`${msg ?? ""} ${JSON.stringify(obj)}`),
+      error: (obj, msg) => problems.push(`${msg ?? ""} ${JSON.stringify(obj)}`),
+    };
+    const client = new DaemonClient({
+      url: "ws://fake-daemon.invalid/ws", clientId: `zerosub-test-${randomUUID()}`, clientType: "cli", logger,
+      transportFactory: daemon.transportFactory, connectTimeoutMs: 1_000,
+      reconnect: { enabled: options.reconnect ?? true, baseDelayMs: 5, maxDelayMs: 20 },
+    });
+    await client.connect();
+    const paseo = createPaseoApi(client);
+    const stateStore = new StateStore(path);
+    let closed = false;
+    const close = async () => {
+      if (closed) return;
+      closed = true;
+      await paseo.dispose();
+      await client.close();
+    };
+    cleanups.push(close);
+    return { client, paseo, problems, close, store: stateStore, manager: new AntigravityContinuations(stateStore) };
+  }
+
+  function expectCleanWire(...plugins: Array<{ problems: string[] }>) {
+    expect(daemon.violations).toEqual([]);
+    for (const entry of plugins) expect(entry.problems.filter((problem) => /validation|invalid|Subscription failed/i.test(problem))).toEqual([]);
+  }
+
+  return { path, daemon, account, plugin, expectCleanWire };
+}
+
 const why = "you switched accounts";
 
 describe("Codex continuations through the Paseo SDK", () => {
@@ -539,6 +592,152 @@ describe("Codex continuations through the Paseo SDK", () => {
     expect(sends[0]).toMatchObject({ agentId: reserved.agentId, messageId: reserved.messageId });
     expect(t.daemon.receipts(reserved.agentId, reserved.messageId)).toHaveLength(1);
     expect((await new StateStore(t.path).read()).continuations[ROOT]!.pending).toBeUndefined();
+    t.expectCleanWire(first, second);
+  });
+});
+
+describe("Antigravity continuations through the Paseo SDK", () => {
+  it("round-trips A→B→A→B with one native tab and incremental, ID-carrying sends", async () => {
+    const t = await setupAntigravity();
+    const p = await t.plugin();
+    const b = await p.manager.continue(p.paseo, ROOT, t.account("b"), why);
+    await p.store.update((draft) => {
+      draft.sessions[b.agentId] = {
+        accountId: "b", family: "antigravity", openedAt: new Date().toISOString(),
+        authGeneration: draft.antigravityAccountGenerations.b ?? 0,
+        authHome: t.account("b").home,
+      };
+    });
+    expect((await p.store.read()).sessions[b.agentId]).toMatchObject({ accountId: "b", family: "antigravity" });
+    await t.daemon.idle();
+    t.daemon.userTurn(b.agentId, "Only change the test now. Keep the parser.", "Added the regression test; it passes.");
+
+    const returnedToA = await p.manager.continue(p.paseo, b.agentId, t.account("a"), why).catch((error: unknown) => {
+      throw new Error(`B→A failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    expect(returnedToA.agentId).toBe(ROOT);
+    await t.daemon.idle();
+    t.daemon.userTurn(ROOT, "Commit it.", "Committed the tested change.");
+    const returnedToB = await p.manager.continue(p.paseo, ROOT, t.account("b"), why).catch((error: unknown) => {
+      throw new Error(`A→B failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    expect(returnedToB.agentId).toBe(b.agentId);
+    await t.daemon.idle();
+
+    const creates = t.daemon.requests("agent.create.request");
+    expect(creates).toHaveLength(1);
+    expect(creates[0]).toMatchObject({
+      agentId: b.agentId,
+      idempotencyKey: b.agentId,
+      workspaceId: WORKSPACE_ID,
+      labels: { "zerosub.continued-from": ROOT },
+    });
+    expect(creates[0]!.initialPrompt).toBeUndefined();
+    expect(t.daemon.agents.size).toBe(2);
+
+    const sends = t.daemon.requests("send_agent_message_request");
+    expect(sends.map((send) => send.agentId)).toEqual([b.agentId, ROOT, b.agentId]);
+    for (const send of sends) {
+      expect(send.messageId).toMatch(/^zerosub-antigravity-handoff-/);
+      const receipts = t.daemon.receipts(send.agentId, send.messageId!);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]!.turnId).toBeTruthy();
+    }
+    const toB = t.daemon.receipts(b.agentId, sends[0]!.messageId!)[0]!.item;
+    expect(toB.type === "user_message" && toB.text).toContain("Repair the build");
+    expect(toB.type === "user_message" && toB.text).toContain("parser has been repaired");
+    const toA = t.daemon.receipts(ROOT, sends[1]!.messageId!)[0]!.item;
+    expect(toA.type === "user_message" && toA.text).toContain("Only change the test now");
+    expect(toA.type === "user_message" && toA.text).not.toContain("Repair the build");
+    const backToB = t.daemon.receipts(b.agentId, sends[2]!.messageId!)[0]!.item;
+    expect(backToB.type === "user_message" && backToB.text).toContain("Commit it");
+    expect(backToB.type === "user_message" && backToB.text).not.toContain("Only change the test now");
+
+    expect(t.daemon.requests("fetch_agent_timeline_request").every((request) => request.projection === "canonical")).toBe(true);
+    const chain = (await new StateStore(t.path).read()).antigravityContinuations[ROOT]!;
+    expect(chain.pending).toBeUndefined();
+    expect(chain.activeAgentId).toBe(b.agentId);
+    t.expectCleanWire(p);
+  });
+
+  it("recovers a delivered Antigravity handoff whose send acknowledgement was lost without sending twice", async () => {
+    const t = await setupAntigravity();
+    const p = await t.plugin();
+    const b = await p.manager.continue(p.paseo, ROOT, t.account("b"), why);
+    await p.store.update((draft) => {
+      draft.sessions[b.agentId] = {
+        accountId: "b", family: "antigravity", openedAt: new Date().toISOString(),
+        authGeneration: draft.antigravityAccountGenerations.b ?? 0,
+        authHome: t.account("b").home,
+      };
+    });
+    await t.daemon.idle();
+    t.daemon.userTurn(b.agentId, "Use the compatibility API.", "Compatibility checks are green.");
+
+    const dropped = t.daemon.dropReplyTo("send_agent_message_request");
+    await expect(p.manager.continue(p.paseo, b.agentId, t.account("a"), why)).rejects.toThrow(/connection reset|Connection lost|Transport closed/i);
+    await dropped;
+    const lost = t.daemon.requests("send_agent_message_request").at(-1)!;
+    expect(lost.agentId).toBe(ROOT);
+    expect(t.daemon.receipts(ROOT, lost.messageId!)).toHaveLength(1);
+    expect((await new StateStore(t.path).read()).antigravityContinuations[ROOT]!.pending)
+      .toMatchObject({ agentId: ROOT, messageId: lost.messageId, stage: "sending" });
+
+    await p.client.connect();
+    await t.daemon.idle();
+    expect((await p.manager.continue(p.paseo, b.agentId, t.account("a"), why)).agentId).toBe(ROOT);
+
+    expect(t.daemon.requests("send_agent_message_request").filter((send) => send.messageId === lost.messageId)).toHaveLength(1);
+    expect(t.daemon.requests("send_agent_message_request")).toHaveLength(2);
+    expect(t.daemon.receipts(ROOT, lost.messageId!)).toHaveLength(1);
+    expect((await new StateStore(t.path).read()).antigravityContinuations[ROOT]!.pending).toBeUndefined();
+    t.expectCleanWire(p);
+  });
+
+  it("recovers an Antigravity tab creation whose SDK response was lost", async () => {
+    const t = await setupAntigravity();
+    const p = await t.plugin();
+    const dropped = t.daemon.dropReplyTo("agent.create.request");
+
+    const b = await p.manager.continue(p.paseo, ROOT, t.account("b"), why);
+    await dropped;
+    await t.daemon.idle();
+
+    expect(t.daemon.requests("agent.create.request")).toHaveLength(1);
+    expect(t.daemon.requests("creation.subscribe.request")).toMatchObject([{ kind: "agent", idempotencyKey: b.agentId }]);
+    expect(t.daemon.agents.size).toBe(2);
+    const send = t.daemon.requests("send_agent_message_request")[0]!;
+    expect(send.agentId).toBe(b.agentId);
+    expect(t.daemon.receipts(b.agentId, send.messageId!)).toHaveLength(1);
+    expect((await new StateStore(t.path).read()).antigravityContinuations[ROOT]!.pending).toBeUndefined();
+    t.expectCleanWire(p);
+  });
+
+  it("reuses the reserved Antigravity tab ID after plugin restart during creation", async () => {
+    const t = await setupAntigravity();
+    const first = await t.plugin({ reconnect: false });
+    const dropped = t.daemon.dropReplyTo("agent.create.request");
+    const attempt = first.manager.continue(first.paseo, ROOT, t.account("b"), why);
+    await dropped;
+    await first.close();
+    await expect(attempt).rejects.toThrow(/closed/i);
+    const reserved = (await new StateStore(t.path).read()).antigravityContinuations[ROOT]!.pending!;
+    expect(reserved.stage).toBe("creating");
+    expect(t.daemon.agents.has(reserved.agentId)).toBe(true);
+
+    const second = await t.plugin();
+    expect((await second.manager.continue(second.paseo, ROOT, t.account("b"), why)).agentId).toBe(reserved.agentId);
+    await t.daemon.idle();
+
+    const creates = t.daemon.requests("agent.create.request");
+    expect(creates.length).toBeGreaterThanOrEqual(1);
+    for (const create of creates) expect(create).toMatchObject({ agentId: reserved.agentId, idempotencyKey: reserved.agentId });
+    expect(t.daemon.agents.size).toBe(2);
+    const sends = t.daemon.requests("send_agent_message_request");
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatchObject({ agentId: reserved.agentId, messageId: reserved.messageId });
+    expect(t.daemon.receipts(reserved.agentId, reserved.messageId)).toHaveLength(1);
+    expect((await new StateStore(t.path).read()).antigravityContinuations[ROOT]!.pending).toBeUndefined();
     t.expectCleanWire(first, second);
   });
 });

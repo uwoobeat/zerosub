@@ -48,7 +48,7 @@ function reading(windows: UsageWindow[], extra: Partial<Usage> = {}): Usage {
   return { fetchedAt: new Date().toISOString(), windows, error: null, cached: false, resets: null, ...extra };
 }
 
-async function setup() {
+async function setup(autoSwitch = false) {
   const store = new StateStore(join(root, "state.json"));
   await store.update((draft) => {
     draft.accounts = [stored(MAIN), stored(A), stored(B)];
@@ -60,7 +60,7 @@ async function setup() {
   const redeemReset = vi.fn<FamilyAdapter["redeemReset"]>(async () => ({ outcome: "none", message: "none", left: null }));
   const adapter: FamilyAdapter = {
     family: "antigravity", portable: false, usageSpacingMs: 0,
-    capabilities: { managedAccounts: true, loginMethods: ["code"], autoSwitch: false, resets: false, fork: false },
+    capabilities: { managedAccounts: true, loginMethods: ["code"], autoSwitch, resets: false, fork: false },
     available: async () => ({ ok: false, detail: null }),
     prepareHome, env: async (home): Promise<EnvPatch> => home ? { HOME: home, DBUS_SESSION_BUS_ADDRESS: "" } : {},
     identity: async () => ({ signedIn: true, email: null, plan: null, organization: null, identity: null }),
@@ -72,15 +72,67 @@ async function setup() {
     currentModeId: "careful", thinkingOptionId: "high",
   };
   const children: typeof agent[] = [];
+  let incompleteAgentList = false;
+  const timelines = new Map<string, Array<{ item: { type: "user_message" | "assistant_message"; text: string; clientMessageId?: string }; timestamp: string; seqStart: number; seqEnd: number; turnId?: string }>>();
+  timelines.set(AGENT, [{
+    item: { type: "user_message", text: "Continue the task" }, timestamp: "2026-10-01T00:00:00Z", seqStart: 1, seqEnd: 1, turnId: "initial-turn",
+  }]);
   const created = vi.fn(async (request: { agentId: string; title: string; labels: Record<string, string>; config: { provider: string } }) => {
-    children.push({ ...agent, id: request.agentId, title: request.title, labels: request.labels });
+    children.push({ ...agent, id: request.agentId, title: request.title, labels: request.labels, lastUserMessageAt: null });
+    timelines.set(request.agentId, []);
     return {};
   });
+  const sent: Array<{ id: string; text: string; messageId?: string }> = [];
   const notes = vi.fn(async (_item: unknown) => undefined);
   const paseo = {
     agents: {
-      list: async () => ({ entries: [agent, ...children].map((agent) => ({ agent })), pageInfo: { hasMore: false, nextCursor: null } }),
-      ref: (id = AGENT) => ({ refresh: async () => ({ agent: children.find((child) => child.id === id) ?? agent }), timeline: { append: notes, refetch: async () => ({ entries: [{ item: { type: "user_message", text: "Continue the task" } }] }) } }),
+      list: async () => ({
+        entries: [agent, ...children].map((agent) => ({ agent })),
+        pageInfo: incompleteAgentList ? { hasMore: true, nextCursor: "truncated" } : { hasMore: false, nextCursor: null },
+      }),
+      ref: (id = AGENT) => ({
+        refresh: async () => {
+          const child = children.find((entry) => entry.id === id);
+          return { agent: child ?? agent };
+        },
+        send: async (text: string, options?: { messageId?: string }) => {
+          sent.push({ id, text, messageId: options?.messageId });
+          const entries = timelines.get(id) ?? [];
+          const seq = (entries.at(-1)?.seqEnd ?? 0) + 1;
+          entries.push({ item: { type: "user_message", text, clientMessageId: options?.messageId }, timestamp: new Date(Date.now() + seq * 1000).toISOString(), seqStart: seq, seqEnd: seq, turnId: `turn-${seq}` });
+          timelines.set(id, entries);
+          const child = children.find((entry) => entry.id === id);
+          if (child) child.lastUserMessageAt = entries.at(-1)!.timestamp;
+          const bound = (await store.read()).bindings[id];
+          if (bound) await store.update((draft) => { draft.sessions[id] = {
+            accountId: bound.accountId,
+            family: "antigravity",
+            openedAt: new Date().toISOString(),
+            authGeneration: draft.antigravityAccountGenerations[bound.accountId] ?? 0,
+            authHome: draft.accounts.find((account) => account.id === bound.accountId)?.home ?? null,
+          }; });
+        },
+        timeline: {
+          append: notes,
+          refetch: async (options: { direction?: "tail" | "before"; cursor?: { epoch: string; seq: number }; limit?: number } = {}) => {
+            const entries = timelines.get(id) ?? [];
+            const epoch = `epoch-${id}`;
+            const eligible = options.direction === "before" ? entries.filter((entry) => entry.seqEnd < (options.cursor?.seq ?? 0)) : entries;
+            const page = eligible.slice(-(options.limit ?? 500));
+            return {
+              entries: page,
+              epoch,
+              window: { minSeq: entries[0]?.seqStart ?? 0, maxSeq: entries.at(-1)?.seqEnd ?? 0, nextSeq: (entries.at(-1)?.seqEnd ?? 0) + 1 },
+              startCursor: page.length ? { epoch, seq: page[0]!.seqStart } : null,
+              endCursor: page.length ? { epoch, seq: page.at(-1)!.seqEnd } : null,
+              hasOlder: eligible.length > page.length,
+              hasNewer: false,
+              gap: false,
+              staleCursor: false,
+            };
+          },
+        },
+      }),
     },
     workspaces: { ref: () => ({ agents: { create: created } }) },
   };
@@ -94,7 +146,10 @@ async function setup() {
   services.push(service);
   service.attach(paseo as never);
   const open = (reason = "create", env: Record<string, string> = { KEEP: "yes" }) => service.onSessionOpen({ agentId: AGENT, provider: "antigravity", reason, purpose: "interactive", env, cwd: "/work" } as never, { paseo } as never);
-  return { store, service, adapter, usage, prepareHome, login, redeemReset, agent, paseo, open, created, notes, reopened, providerFamilies };
+  return {
+    store, service, adapter, usage, prepareHome, login, redeemReset, agent, paseo, open, created, sent, notes, reopened, providerFamilies, timelines,
+    set incompleteAgentList(value: boolean) { incompleteAgentList = value; },
+  };
 }
 
 describe("Antigravity service integration", () => {
@@ -114,7 +169,7 @@ describe("Antigravity service integration", () => {
     const { store, open, prepareHome } = await setup();
     await store.update((draft) => {
       draft.bindings[AGENT] = { accountId: A, source: "user", at: new Date().toISOString() };
-      draft.sessions[AGENT] = { accountId: B, family: "antigravity", openedAt: new Date().toISOString() };
+      draft.sessions[AGENT] = { accountId: B, family: "antigravity", openedAt: new Date().toISOString(), authHome: stored(B).home };
     });
     prepareHome.mockRejectedValueOnce(new Error("unsafe home"));
     expect(await open("refresh")).toBeUndefined();
@@ -175,6 +230,19 @@ describe("Antigravity service integration", () => {
     adapter.identity = async () => ({ signedIn: false, email: null, plan: null, organization: null, identity: null });
     const view = await service.view(paseo as never, true);
     expect(view.accounts.find((account) => account.id === A)?.status).toBe("signed_out");
+  });
+
+  it("records an observed sign-out and re-login even when Antigravity identity remains unknown", async () => {
+    const { service, adapter, store, open, paseo } = await setup();
+    await open();
+    await store.update((draft) => { draft.accounts.find((account) => account.id === A)!.signedIn = false; });
+    adapter.identity = async () => ({ signedIn: true, email: null, plan: null, organization: null, identity: null });
+
+    await service.view(paseo as never, true);
+
+    const state = await store.read();
+    expect(state.antigravityAccountGenerations[A]).toBe(1);
+    expect(state.sessions[AGENT]?.authGeneration).toBe(0);
   });
 
   it("doesn't bypass usage spacing through an explicit identity refresh", async () => {
@@ -245,19 +313,46 @@ describe("Antigravity service integration", () => {
     expect((await store.read()).bindings[AGENT]?.source).toBe("thread");
   });
 
+  it("does not enable new-agent balancing when a future adapter supports automatic switching", async () => {
+    const { usage, service, open, store } = await setup(true);
+    service.setPreferences(preferences.schema.parse({ balanceNewAgents: true, autoSwitch: true, antigravityAutoSwitch: true }));
+    usage.mockResolvedValueOnce(reading([quota("third-party", "claude-model", 80)]))
+      .mockResolvedValueOnce(reading([quota("third-party", "claude-model", 10)]));
+    await service.refreshUsage(A, true);
+    await service.refreshUsage(B, true);
+    expect((await open())?.env.HOME).toBe(stored(A).home);
+    expect((await store.read()).bindings[AGENT]?.source).toBe("thread");
+  });
+
   it("continues an existing conversation on the chosen account in the same workspace without reopening the original", async () => {
-    const { service, store, agent, open, paseo, created, reopened } = await setup();
+    const { service, store, agent, open, paseo, created, sent, reopened } = await setup();
     await open();
     agent.lastUserMessageAt = new Date().toISOString();
     const result = await service.setAgentAccount(paseo as never, AGENT, B);
     expect(result.continuedIn?.agentId).toBeTruthy();
-    expect(created).toHaveBeenCalledWith(expect.objectContaining({ config: { provider: "antigravity/claude-model", modeId: "careful", thinkingOptionId: "high" }, prompt: expect.stringContaining("earlier Antigravity session") }));
+    expect(created).toHaveBeenCalledWith(expect.objectContaining({ config: { provider: "antigravity/claude-model", modeId: "careful", thinkingOptionId: "high" } }));
+    expect(sent[0]?.text).toContain("Continue the task");
     const state = await store.read();
     expect(state.bindings[result.continuedIn!.agentId]?.accountId).toBe(B);
     expect(state.sessions[AGENT]?.accountId).toBe(A);
     expect(state.bindings[AGENT]?.accountId).toBe(A);
     expect(reopened).not.toHaveBeenCalled();
     expect(state.continuations).toEqual({});
+    expect(state.antigravityContinuations).toHaveProperty(AGENT);
+  });
+
+  it("doesn't prune task tabs when Paseo returns an incomplete agent list", async () => {
+    const t = await setup();
+    await t.open();
+    t.agent.lastUserMessageAt = new Date().toISOString();
+    const child = (await t.service.setAgentAccount(t.paseo as never, AGENT, B)).continuedIn!.agentId;
+    t.incompleteAgentList = true;
+
+    await (t.service as unknown as { prune(paseo: typeof t.paseo): Promise<void> }).prune(t.paseo as never);
+
+    const chain = (await t.store.read()).antigravityContinuations[AGENT]!;
+    expect(chain.members[AGENT]).toBeDefined();
+    expect(chain.members[child]).toBeDefined();
   });
 
   it("waits for a busy conversation to finish before a manual continuation", async () => {
@@ -279,6 +374,22 @@ describe("Antigravity service integration", () => {
     await service.setAgentAccount(paseo as never, AGENT, A);
     expect(created).toHaveBeenCalledTimes(1);
     expect((await store.read()).bindings[AGENT]?.accountId).toBe(A);
+  });
+
+  it("opens a fresh tab for the same account after re-authentication even before a chain exists", async () => {
+    const { service, store, agent, open, paseo, created } = await setup();
+    await open();
+    agent.lastUserMessageAt = new Date().toISOString();
+    await store.update((draft) => { draft.antigravityAccountGenerations[A] = 1; });
+
+    const result = await service.setAgentAccount(paseo as never, AGENT, A);
+
+    expect(result.continuedIn?.agentId).toBeTruthy();
+    expect(result.continuedIn?.agentId).not.toBe(AGENT);
+    expect(created).toHaveBeenCalledTimes(1);
+    const chain = (await store.read()).antigravityContinuations[AGENT]!;
+    expect(chain.members[AGENT]?.generation).toBe(0);
+    expect(chain.members[result.continuedIn!.agentId]?.generation).toBe(1);
   });
 
   it("reuses one continuation for simultaneous requests to the same target", async () => {
@@ -315,7 +426,16 @@ describe("Antigravity service integration", () => {
     const { service, agent, paseo, created } = await setup();
     agent.lastUserMessageAt = new Date().toISOString();
     const originalRef = paseo.agents.ref;
-    paseo.agents.ref = () => ({ ...originalRef(), timeline: { ...originalRef().timeline, refetch: async () => ({ entries: [] }) } });
+    paseo.agents.ref = () => ({
+      ...originalRef(),
+      timeline: {
+        ...originalRef().timeline,
+        refetch: async () => ({
+          entries: [], epoch: "lost", window: { minSeq: 0, maxSeq: 0, nextSeq: 1 },
+          startCursor: null, endCursor: null, hasOlder: false, hasNewer: false, gap: false, staleCursor: false,
+        }),
+      },
+    });
     await expect(service.setAgentAccount(paseo as never, AGENT, B)).rejects.toThrow(/history is unavailable/);
     expect(created).not.toHaveBeenCalled();
   });

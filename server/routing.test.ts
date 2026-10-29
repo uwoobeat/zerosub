@@ -349,15 +349,16 @@ describe("scoped routing decisions", () => {
     expect(decision?.bind).toBeNull();
   });
 
-  it("balances new Antigravity agents when the model is known", () => {
-    const decision = chooseAccount(state, {
+  it("does not balance new Antigravity agents even when the model is known", () => {
+    const fresh = stateWith([account({ id: "antigravity-a", family: "antigravity" }), other]);
+    const decision = chooseAccount(fresh, {
       ...antigravity,
       balanceNewAgents: true,
       reason: "create",
-      usageOf,
+      usageOf: (id) => groupedUsage({ unscoped: 10, gemini: id === "antigravity-a" ? 80 : 10, third: 10 }),
     });
-    expect(decision?.account.id).toBe("antigravity-b");
-    expect(decision?.bind?.source).toBe("balance");
+    expect(decision?.account.id).toBe("antigravity-a");
+    expect(decision?.bind).toBeNull();
   });
 });
 

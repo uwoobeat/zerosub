@@ -31,7 +31,7 @@ npm run audit:mobile
 | --- | --- |
 | 계정 선택·제공자 라우팅 | `server/routing.test.ts` |
 | native Antigravity quota·환경·인증 경계 | `server/antigravity.test.ts`, `server/antigravity-process.test.ts` |
-| Antigravity Service 연결·그룹별 제한·continuation | `server/service-antigravity.test.ts` |
+| Antigravity Service 연결·그룹별 제한·작업 탭 continuation | `server/service-antigravity.test.ts`, `server/antigravity-continuations.test.ts`, `server/continuations.sdk.test.ts` |
 | 모델별 quota 표시·capability 기반 UI | `client/presentation.test.ts`, `shared/format.test.ts` |
 | Service의 전환·실패·재로드 처리 | `server/failover.test.ts` |
 | Codex 작업별 탭 재사용·중복 전달·SDK 연결 | `server/continuations.test.ts`, `server/continuations.sdk.test.ts` |
@@ -65,9 +65,13 @@ npm test -- shared/format.test.ts
 
 한도 처리에서는 실제 실행 계정과 binding이 다른 경우, `turnId: null`의 과거 알림,
 취소된 턴, 일반 API 오류·용량 429 오탐, 캐시가 새 한도를 지우는 경우를 확인한다.
-세션 전환에서는 busy 상태, 재로드 실패·시간 초과, 전환 횟수 제한, Codex 기존 thread 고정을 확인한다.
+세션 전환에서는 busy 상태, 재로드 실패·시간 초과, 전환 횟수 제한, Codex 기존 thread 고정과
+Antigravity 작업 탭의 계정·인증 세대·설정 귀속을 확인한다.
 리셋에서는 동시 실패·중복 요청·이미 해소된 한도·결과 불명확 응답을 확인한다.
 인계에서는 중복 continuation 방지·workspace 유지·reasoning 제외·권한 상승 방지를 확인한다.
+Antigravity에서는 epoch 변경·retained window·projected cursor overlap, parked timeline 읽기 실패,
+receipt 없는 send의 동일 ID 재시도, plugin restart와 filtered list에서의 pruning 보류도 확인한다.
+SDK `send()`의 busy check와 실제 전송 사이에는 원자적 조건부 전송 API가 없으므로 이 경계도 별도 위험으로 보고한다.
 파일 처리에서는 공유 원본 보호, 중첩 symlink, 부분 상태 손상, 임시 읽기 오류를 확인한다.
 이 목록 전체가 이미 자동 테스트로 구현돼 있다고 가정하지 않는다.
 

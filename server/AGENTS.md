@@ -52,6 +52,19 @@ Codex의 계정 변경에는 `continueInNewAgent()`를 사용한다. 원본 work
 유지하고, 생성 전에 새 계정을 bind한다. 이전 continuation을 재사용하는 중복 방지 경로를 보존한다.
 Codex의 `CodexContinuations`는 작업·계정별 탭과 전달 위치를 저장하고 불명확한 전송을 반복하지
 않는다. Codex 전용 체인 처리를 Antigravity의 continuation에 적용하지 않는다.
+Antigravity 수동 전환은 별도 `AntigravityContinuations` 체인을 사용한다. 탭 재사용 전 실제 session
+계정·인증 홈·관측한 인증 세대·workspace·provider/model/mode/thinking/features를 비교한다.
+CLI identity가 unknown이어도 계정 ID와 home은 확인하되, 관측하지 못한 외부 재로그인까지 감지한다고
+가정하지 않는다. `zerosub.continued-from` 계보와 실제 session 귀속을 확인해 기존 continuation을
+채택한다. 어느 탭이든 실행 중이거나 권한 요청이 있으면 전환을 거부하고, 목록 누락만으로 탭이나
+binding을 지우지 않는다. Paseo timeline의 `epoch/seq` 커서·대상 ID·message ID를 예약한다.
+Paseo의 projected timeline 항목이 저장 cursor를 가로지르면 전달을 거부한다. 전송 영수증이
+불확실하면 pending에 정확한 prompt를 임시 저장해 같은 prompt와 message ID로만 재시도하며,
+확정 뒤 본문을 지운다. 대상 탭의 baseline 손실은 다른 멤버의 검증된 전체 이력으로만 재구성한다.
+필요한 멤버 timeline 읽기가 실패하거나 epoch가 바뀌어 기준 문맥을 검증할 수 없으면 중단한다. Native conversation 재개를 timeline
+복원으로 간주하지 않으며 timeline 조회가 closed session을 재개할 수 있다는 부작용도 고려한다.
+SDK send의 busy 재확인과 실제 전송 사이에는 원자적 조건부 전송이 없으므로 이 경쟁 구간을 위험으로
+남기고, 전송 직전 상태를 다시 확인한다.
 전달문에는 기존 대화·작업 요약만 포함하고 reasoning이나 원시 도구 출력을 추가하지 않는다.
 같은 제공자에서만 model/mode/thinking 설정을 이어받는다. 다른 제공자에서는 대상 기본 모델과
 `equivalentMode()`를 사용한다. 모드가 불명확하거나 안전한 대응 모드가 없으면 fork하지 않는다.

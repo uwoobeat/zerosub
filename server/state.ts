@@ -64,6 +64,10 @@ export const LiveSessionSchema = z.object({
   accountId: z.string(),
   family: FamilySchema,
   openedAt: z.string(),
+  /** AGY authentication generation actually used when this native session was opened. */
+  authGeneration: z.number().int().nonnegative().optional(),
+  /** Managed AGY HOME actually applied to this session; null means the host CLI login. */
+  authHome: z.string().nullable().optional(),
 });
 export type LiveSession = z.infer<typeof LiveSessionSchema>;
 
@@ -93,6 +97,56 @@ export const ContinuationChainSchema = z.object({
 });
 export type ContinuationChain = z.infer<typeof ContinuationChainSchema>;
 
+const AntigravityContinuationMemberSchema = z.object({
+  accountId: z.string(),
+  home: z.string().nullable(),
+  identity: z.string().nullable(),
+  email: z.string().nullable(),
+  /** Incremented when ZeroSub observes that this account authenticated again. */
+  generation: z.number().int().nonnegative(),
+  /** Provider, model, permission mode, thinking option and feature values. */
+  configKey: z.string(),
+  /** Paseo source timeline positions already delivered to this tab. */
+  seen: z.record(z.string(), TimelineMarkSchema).default({}),
+  /** Last verified epoch and timeline position observed for this tab itself. */
+  timelineMark: TimelineMarkSchema.optional(),
+  /** Receipt for the last handoff sent to this tab; used to detect timeline loss. */
+  lastHandoffMessageId: z.string().optional(),
+  /** Snapshot metadata paired with timelineMark to detect changes in parked tabs. */
+  updatedAt: z.string().optional(),
+  lastUserMessageAt: z.string().nullable().optional(),
+  /** The directory and direct refresh both confirmed this historical member is gone. */
+  missing: z.boolean().optional(),
+  /** Reserved/created without a handoff; not a source of task history yet. */
+  unstarted: z.boolean().optional(),
+});
+const AntigravityContinuationSchema = z.object({
+  activeAgentId: z.string(),
+  members: z.record(z.string(), AntigravityContinuationMemberSchema),
+  /** First handoff carrying inherited task context, retained if its source tab is pruned. */
+  baselineMessageId: z.string().optional(),
+  /** Initial source cursor, used to verify that its history still has the original epoch. */
+  baselineSource: z.object({ agentId: z.string(), mark: TimelineMarkSchema }).optional(),
+  /** Written before create/send. An uncertain send must never start a second turn. */
+  pending: z.object({
+    agentId: z.string(),
+    sourceAgentId: z.string(),
+    accountId: z.string(),
+    messageId: z.string(),
+    /** Kept only while a send receipt is uncertain so an idempotent retry is byte-identical. */
+    prompt: z.string().optional(),
+    seen: z.record(z.string(), TimelineMarkSchema),
+    observed: z.record(z.string(), z.object({
+      mark: TimelineMarkSchema,
+      updatedAt: z.string().optional(),
+      lastUserMessageAt: z.string().nullable().optional(),
+    })).default({}),
+    stage: z.enum(["creating", "sending"]),
+  }).optional(),
+});
+export type AntigravityContinuation = z.infer<typeof AntigravityContinuationSchema>;
+export type AntigravityContinuationMember = AntigravityContinuation["members"][string];
+
 export const StoredStateSchema = z.object({
   version: z.literal(1).default(1),
   accounts: z.array(StoredAccountSchema).default([]),
@@ -108,6 +162,10 @@ export const StoredStateSchema = z.object({
   /** Which account each agent's live provider session was opened with. */
   sessions: z.record(z.string(), LiveSessionSchema).default({}),
   continuations: z.record(z.string(), ContinuationChainSchema).default({}),
+  /** Antigravity's account-bound task tabs are deliberately separate from Codex threads. */
+  antigravityContinuations: z.record(z.string(), AntigravityContinuationSchema).default({}),
+  /** Re-authentication epochs let tab reuse reject a session from an earlier login. */
+  antigravityAccountGenerations: z.record(z.string(), z.number().int().nonnegative()).default({}),
 });
 export type StoredState = z.infer<typeof StoredStateSchema>;
 
@@ -160,6 +218,8 @@ export function salvageState(raw: unknown): { state: StoredState; dropped: boole
       bindings: records(BindingSchema, source.bindings),
       sessions: records(LiveSessionSchema, source.sessions),
       continuations: records(ContinuationChainSchema, source.continuations),
+      antigravityContinuations: records(AntigravityContinuationSchema, source.antigravityContinuations),
+      antigravityAccountGenerations: records(z.number().int().nonnegative(), source.antigravityAccountGenerations),
     },
     dropped: true,
   };

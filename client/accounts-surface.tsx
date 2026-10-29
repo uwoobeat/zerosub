@@ -811,17 +811,17 @@ function AutomationSettings({ theme, state }: { theme: Theme; state: StateView |
             label="Switch Antigravity accounts automatically"
             hint={
               antigravitySwitch
-                ? "Off by default. Antigravity account switching is still being verified, so only turn it on if you want it."
+                ? "Off by default. Also requires the main automatic switching setting above."
                 : "Off and unavailable on this host until Antigravity account switching is supported and verified."
             }
             value={antigravitySwitch ? settings.values.antigravityAutoSwitch : false}
-            disabled={settings.saving || !antigravitySwitch}
+            disabled={settings.saving || !antigravitySwitch || !settings.values.autoSwitch}
             onValueChange={(antigravityAutoSwitch) => save({ antigravityAutoSwitch })}
           />
         ) : null}
         <SettingsSwitch
           label="Spread new agents across accounts"
-          hint="New agents start on the account with the most room instead of the default."
+          hint="New Claude and ChatGPT agents start on the account with the most room instead of the default."
           value={settings.values.balanceNewAgents}
           disabled={settings.saving}
           onValueChange={(balanceNewAgents) => save({ balanceNewAgents })}

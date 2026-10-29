@@ -118,6 +118,15 @@ describe("scoped limits", () => {
     const store = new StateStore(path);
     const scopedLimits = [{ scopeId: "gemini", limitedUntil: "2026-10-30T14:00:00Z", limitedAt: "2026-10-29T09:00:00Z", kind: "window" as const }];
     const chain = { activeAgentId: "codex-agent", members: { "codex-agent": { accountId: MAIN_ACCOUNT_ID.codex, identity: null, email: null, seen: {} } } };
+    const antigravityChain = {
+      activeAgentId: "agy-agent",
+      members: {
+        "agy-agent": {
+          accountId: MAIN_ACCOUNT_ID.antigravity, home: null, identity: null, email: null,
+          generation: 3, configKey: "native/model|mode|think|{}", seen: {},
+        },
+      },
+    };
     await store.update((draft) => {
       draft.accounts = [
         StoredAccountSchema.parse({ ...account, id: MAIN_ACCOUNT_ID.codex, family: "codex" }),
@@ -125,10 +134,35 @@ describe("scoped limits", () => {
       ];
       draft.defaults.antigravity = MAIN_ACCOUNT_ID.antigravity;
       draft.continuations["codex-root"] = chain;
+      draft.antigravityContinuations["agy-root"] = antigravityChain;
+      draft.antigravityAccountGenerations[MAIN_ACCOUNT_ID.antigravity] = 3;
     });
     const reloaded = await new StateStore(path).read();
     expect(reloaded.defaults.antigravity).toBe(MAIN_ACCOUNT_ID.antigravity);
     expect(reloaded.accounts.find((entry) => entry.family === "antigravity")?.scopedLimits).toEqual(scopedLimits);
     expect(reloaded.continuations["codex-root"]).toEqual(chain);
+    expect(reloaded.antigravityContinuations["agy-root"]).toEqual(antigravityChain);
+    expect(reloaded.antigravityAccountGenerations[MAIN_ACCOUNT_ID.antigravity]).toBe(3);
+  });
+
+  it("loads older state with empty Antigravity continuation defaults and salvages AGY records independently", () => {
+    const codex = {
+      activeAgentId: "codex-agent",
+      members: { "codex-agent": { accountId: MAIN_ACCOUNT_ID.codex, identity: null, email: null, seen: {} } },
+    };
+    const { state, dropped } = salvageState({
+      accounts: [account],
+      continuations: { "codex-root": codex },
+      antigravityContinuations: {
+        broken: { activeAgentId: "bad", members: { bad: { accountId: 4 } } },
+      },
+      antigravityAccountGenerations: { "antigravity-main": -1 },
+    });
+
+    expect(dropped).toBe(true);
+    expect(state.continuations["codex-root"]).toEqual(codex);
+    expect(state.antigravityContinuations).toEqual({});
+    expect(state.antigravityAccountGenerations).toEqual({});
+    expect(salvageState({ accounts: [account] }).state.antigravityContinuations).toEqual({});
   });
 });

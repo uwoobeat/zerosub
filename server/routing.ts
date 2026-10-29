@@ -138,10 +138,8 @@ export function chooseAccount(state: StoredState, input: RouteInput): RouteDecis
   let account = bound && bound.family === input.family ? bound : undefined;
   let bind: Binding | null = null;
 
-  // Without a model we can't tell which Antigravity quota group a new agent will use, so spreading
-  // it by headroom would be a guess. Other families, and Antigravity with a known model, still balance.
-  const knownModel = typeof input.model === "string" && input.model.trim() !== "";
-  const canBalance = input.balanceNewAgents && !(input.family === "antigravity" && !knownModel);
+  // Antigravity quota-based balancing is separate from automatic failover and is not supported yet.
+  const canBalance = input.balanceNewAgents && input.family !== "antigravity";
   if (!account && fresh && canBalance && accounts.length > 1) {
     account = mostAvailable(state, input.family, input.usageOf, input.now, new Set(), input.model);
     if (account) bind = { accountId: account.id, source: "balance", at };
