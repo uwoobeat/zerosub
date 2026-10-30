@@ -615,6 +615,22 @@ describe("Antigravity non-secret identity claims", () => {
     }
   });
 
+  it("reads the CLI's id_token_email field when no ID token is present", async () => {
+    const home = await mkdtemp(join(tmpdir(), "zerosub-antigravity-claims-"));
+    try {
+      await writeCredential(home, {
+        token: { token_type: "Bearer" },
+        auth_method: "oauth",
+        id_token_email: "Profile.Email@Example.com",
+      });
+      const claims = await readAntigravityIdentityClaims(home);
+      expect(claims).toEqual({ email: "Profile.Email@Example.com", subject: null });
+      expect(antigravityIdentityKey(claims!)).toBe("antigravity|email|profile.email@example.com");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("refuses a non-private or symlinked credential file", async () => {
     const home = await mkdtemp(join(tmpdir(), "zerosub-antigravity-claims-"));
     const outside = await mkdtemp(join(tmpdir(), "zerosub-antigravity-outside-"));

@@ -633,7 +633,12 @@ function parseIdentityClaims(raw: string): AntigravityIdentityClaims | null {
       ? (root.token as Record<string, unknown>)
       : null;
   const claims = claimsFromIdToken(root.id_token ?? root.idToken ?? token?.id_token ?? token?.idToken);
-  const email = normalizeEmail(root.email) ?? normalizeEmail(token?.email) ?? claims?.email ?? null;
+  const email =
+    normalizeEmail(root.email) ??
+    normalizeEmail(token?.email) ??
+    normalizeEmail(root.id_token_email) ??
+    claims?.email ??
+    null;
   const subject = claims?.subject ?? null;
   return email || subject ? { email, subject } : null;
 }
