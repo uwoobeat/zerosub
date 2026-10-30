@@ -24,6 +24,7 @@ import {
   supportsFamily,
 } from "./family-support";
 import {
+  focusedUsageGroup,
   groupMissingNote,
   groupStatus,
   groupUsageNote,
@@ -292,7 +293,7 @@ function AccountCard({
   const windows = account.usage?.windows ?? [];
   const scoped = useMemo(() => (hasScopedWindows(windows) ? usageGroups(windows) : []), [windows]);
   const [focusGroupId, setFocusGroupId] = useState<string | null>(null);
-  const focused = scoped.find((group) => group.id === focusGroupId) ?? scoped[0] ?? null;
+  const focused = focusedUsageGroup(scoped, focusGroupId);
   const usageError = account.usage?.error ?? null;
   const limitState = scopedLimitState(account);
   const agents = account.agentCount === 0 ? "No agents" : `${account.agentCount} agent${account.agentCount === 1 ? "" : "s"}`;
@@ -602,6 +603,7 @@ function ScopedUsage({
 }) {
   const text = useText(theme);
   const note = focused ? groupUsageNote(focused) : null;
+  const missing = focused ? groupMissingNote(focused) : null;
   return (
     <View style={{ gap: 12 }}>
       {usage?.cached || usage?.error ? (
@@ -616,7 +618,7 @@ function ScopedUsage({
 
       {groups.length > 1 && focused ? (
         <View style={{ gap: 6 }}>
-          <Text style={text.small}>Compare a model group</Text>
+          <Text style={text.small}>Select a model group</Text>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
             {groups.map((group) => {
               const selected = group.id === focused.id;
@@ -624,7 +626,7 @@ function ScopedUsage({
                 <Pressable
                   key={group.id}
                   accessibilityRole="button"
-                  accessibilityLabel={`Compare ${group.label} usage`}
+                  accessibilityLabel={`Show ${group.label} usage`}
                   accessibilityState={{ selected }}
                   onPress={() => onFocus(group.id)}
                   style={{
@@ -662,19 +664,12 @@ function ScopedUsage({
         </View>
       ) : null}
 
-      {groups.map((group) => {
-        const missing = groupMissingNote(group);
-        return (
-          <View
-            key={group.id}
-            style={{ gap: 8, paddingTop: 10, borderTopWidth: 1, borderTopColor: theme.colors.border }}
-          >
-            <Text style={text.strong}>{group.label}</Text>
-            {group.windows.map((limit) => <UsageBar key={limit.id} theme={theme} limit={limit} showMissingReset />)}
-            {missing ? <Text style={text.small}>{missing}</Text> : null}
-          </View>
-        );
-      })}
+      {focused ? (
+        <View style={{ gap: 8, paddingTop: 10, borderTopWidth: 1, borderTopColor: theme.colors.border }}>
+          {focused.windows.map((limit) => <UsageBar key={limit.id} theme={theme} limit={limit} showMissingReset />)}
+          {missing ? <Text style={text.small}>{missing}</Text> : null}
+        </View>
+      ) : null}
     </View>
   );
 }

@@ -45,6 +45,11 @@ export function usageGroups(windows: readonly UsageWindow[]): UsageGroup[] {
   return groups;
 }
 
+/** Keep the selected group when possible; fall back to the first reported group. */
+export function focusedUsageGroup(groups: readonly UsageGroup[], id: string | null): UsageGroup | null {
+  return groups.find((group) => group.id === id) ?? groups[0] ?? null;
+}
+
 /** The busiest window in this group only. Another group's limit never makes this one look spent. */
 export function groupPeak(group: UsageGroup): UsageWindow | null {
   return peakUsage(group.windows);

@@ -11,6 +11,7 @@ import {
 } from "./family-support";
 import {
   accountUsageNote,
+  focusedUsageGroup,
   groupMissingNote,
   groupStatus,
   groupUsageNote,
@@ -217,6 +218,15 @@ describe("usage groups", () => {
     expect(groups[0]?.models).toEqual(["gemini-flash", "gemini-pro"]);
     expect(hasScopedWindows(scoped)).toBe(true);
     expect(groups[0]?.windows).toEqual(scoped.slice(0, 2));
+  });
+
+  it("selects only the chosen group's windows and falls back when it disappears", () => {
+    const groups = usageGroups(scoped);
+    expect(focusedUsageGroup(groups, null)?.windows).toEqual(scoped.slice(0, 2));
+    expect(focusedUsageGroup(groups, "scope:partner")?.windows).toEqual([scoped[2]]);
+    expect(focusedUsageGroup(groups, "scope:argon")?.windows).toEqual([scoped[3]]);
+    expect(focusedUsageGroup(groups.slice(0, 2), "scope:argon")?.id).toBe("scope:gemini");
+    expect(focusedUsageGroup([], "scope:argon")).toBeNull();
   });
 
   it("never treats equal readings as one shared group", () => {
