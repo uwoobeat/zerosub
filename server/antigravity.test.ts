@@ -418,9 +418,24 @@ describe("experimental Antigravity balance mapping", () => {
     expect(mapped.windows[0]?.scope?.models).toEqual(["another-model", "claude-opus-5-5-high"]);
     expect(mapped.windows[1]).toEqual(usage.windows[1]);
     expect(usage.windows[0]?.scope?.models).toEqual(["another-model"]);
-    expect(experimentalAntigravityBalanceUsage("claude-opus-5-5-low", usage)).toBeNull();
+    expect(experimentalAntigravityBalanceUsage("unknown-model", usage)).toBeNull();
     expect(experimentalAntigravityBalanceUsage(null, usage)).toBeNull();
   });
+
+  it.each([
+    ["gemini-3.8-flash-medium", "gemini-models"],
+    ["gemini-4-argon-high", "gemini-4-argon"],
+    ["claude-sonnet-5-5-low", "claude-and-gpt-models"],
+    ["gpt-oss-120b-medium", "claude-and-gpt-models"],
+  ])("maps %s to %s only", (model, scopeId) => {
+    const usage = UsageSchema.parse({ fetchedAt: FIXED_AT, cached: false, error: null, resets: null,
+      windows: ["gemini-models", "gemini-4-argon", "claude-and-gpt-models"].map((id) => ({
+        id, label: id, usedPercent: 20, resetsAt: null, scope: { id, label: id, models: [] },
+      })) });
+    const mapped = experimentalAntigravityBalanceUsage(model, usage)!;
+    expect(mapped.windows.filter((window) => window.scope?.models.includes(model)).map((window) => window.scope?.id)).toEqual([scopeId]);
+  });
+
 });
 
 describe("experimental Antigravity limit evidence", () => {

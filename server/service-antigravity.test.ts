@@ -157,7 +157,13 @@ async function setup(autoSwitch = false) {
 }
 
 describe("Antigravity service integration", () => {
-  it("balances an unregistered agent using its one-use create model and fresh account quotas", async () => {
+  it.each([
+    ["claude-opus-5-5-high", "claude-and-gpt-models", ["3p-5h", "3p-weekly"]],
+    ["claude-sonnet-5-5-low", "claude-and-gpt-models", ["3p-5h", "3p-weekly"]],
+    ["gpt-oss-120b-medium", "claude-and-gpt-models", ["3p-5h", "3p-weekly"]],
+    ["gemini-3.8-flash-medium", "gemini-models", ["gemini-5h", "gemini-weekly"]],
+    ["gemini-4-argon-high", "gemini-4-argon", ["gemini-argon-wtu-weekly"]],
+  ])("balances an unregistered %s agent using fresh account quotas", async (model, scope, buckets) => {
     const fixture = await setup();
     const { service, store, adapter, paseo } = fixture;
     fixture.agentUnregistered = true;
@@ -168,17 +174,15 @@ describe("Antigravity service integration", () => {
     const revision = (await store.read()).antigravityBalanceConsent.revision;
     await service.consentAntigravityBalance(revision);
     service.setPreferences(preferences.schema.parse({ antigravityBalanceNewAgents: true, autoSwitch: false }));
-    const make = (short: number, weekly: number) => reading([
-      { ...quota("claude-and-gpt-models", "", short), id: "3p-5h", scope: { id: "claude-and-gpt-models", label: "Claude", models: [] } },
-      { ...quota("claude-and-gpt-models", "", weekly), id: "3p-weekly", scope: { id: "claude-and-gpt-models", label: "Claude", models: [] } },
-    ]);
-    service["antigravityReadings"].set(A, { home: stored(A).home, generation: 0, usage: make(20, 80) });
+    const make = (short: number, weekly: number) => reading(buckets.map((id, index) =>
+      ({ ...quota(scope, "", index === 0 ? short : weekly), id, scope: { id: scope, label: scope, models: [] } })));
+    service["antigravityReadings"].set(A, { home: stored(A).home, generation: 0, usage: make(80, 80) });
     service["antigravityReadings"].set(B, { home: stored(B).home, generation: 0, usage: make(45, 35) });
     await store.update((draft) => { draft.antigravityAccountGenerations[A] = 0; draft.antigravityAccountGenerations[B] = 0; });
     const contexts = new CreateContexts();
-    const create = contexts.issue({ config: { provider: "antigravity", cwd: "/work", model: "claude-opus-5-5-high", modeId: "careful", thinkingOptionId: "high", featureValues: { test: true } }, env: { KEEP: "yes" } });
+    const create = contexts.issue({ config: { provider: "antigravity", cwd: "/work", model, modeId: "careful", thinkingOptionId: "high", featureValues: { test: true } }, env: { KEEP: "yes" } });
     const captured = contexts.consume({ agentId: AGENT, workspaceId: "workspace-a", provider: "antigravity", reason: "create", purpose: "interactive", cwd: "/work", env: create.env! });
-    expect(captured.model).toBe("claude-opus-5-5-high");
+    expect(captured.model).toBe(model);
     expect(create.config).toMatchObject({ modeId: "careful", thinkingOptionId: "high", featureValues: { test: true } });
     expect(captured.request.env[CREATE_CONTEXT_ENV]).toBeUndefined();
     const opened = await service.onSessionOpen(captured.request, { paseo, signal: new AbortController().signal } as never, captured.model);

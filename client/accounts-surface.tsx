@@ -828,8 +828,8 @@ function AutomationSettings({ theme, state, store }: { theme: Theme; state: Stat
           <SettingsSwitch
             label="Start new Antigravity agents on the account with the most room"
             hint={settings.values.antigravityBalanceNewAgents && state?.antigravityBalance?.consentRequired
-              ? "Support changed; turn this on again to consent. Experimental and limited to new Claude Opus 5.5 high agents."
-              : "Experimental: Claude Opus 5.5 high only. Uses the freshest shared group quota; missing quota falls back to the default. Applies only to new agents."}
+              ? "Support changed; turn this on again to consent. Experimental and applies only to new agents."
+              : "Experimental: Gemini, Claude and GPT models use their shared group quota; missing quota falls back to the default. Applies only to new agents."}
             value={Boolean(settings.values.antigravityBalanceNewAgents && state?.antigravityBalance && !state.antigravityBalance.consentRequired)}
             disabled={settings.saving || !state?.antigravityBalance?.available || !supportsFamily(state, "antigravity", "balanceNewAgents")}
             onValueChange={(enabled) => {

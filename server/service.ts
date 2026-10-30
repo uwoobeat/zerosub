@@ -34,7 +34,7 @@ import {
 } from "./adapter";
 import { bringsOwnAuth, FamilyResolver } from "./families";
 import { AntigravityContinuations } from "./antigravity-continuations";
-import { EXPERIMENTAL_LIMIT_BUCKETS, EXPERIMENTAL_LIMIT_MODEL, EXPERIMENTAL_LIMIT_SCOPE, experimentalAntigravityBalanceUsage, experimentalAntigravityLimit, isExperimentalAntigravityLimit } from "./antigravity";
+import { EXPERIMENTAL_LIMIT_BUCKETS, EXPERIMENTAL_LIMIT_MODEL, EXPERIMENTAL_LIMIT_SCOPE, experimentalAntigravityBalanceMapping, experimentalAntigravityBalanceUsage, experimentalAntigravityLimit, isExperimentalAntigravityLimit } from "./antigravity";
 import { CodexContinuations } from "./continuations";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
@@ -599,10 +599,11 @@ export class Service {
     if (reserved && (!reservedAccount || reservedAccount.family !== "antigravity")) return undefined;
     const existingSessionAccount = family === "antigravity" && state.sessions[request.agentId]?.family === family
       ? findAccount(state, state.sessions[request.agentId]?.accountId) : undefined;
+    const balanceMapping = experimentalAntigravityBalanceMapping(createModel);
     const canBalance = family === "antigravity" && request.reason === "create" && request.purpose === "interactive" &&
       !reserved && !state.bindings[request.agentId] && !state.sessions[request.agentId] &&
       this.prefs.antigravityBalanceNewAgents && state.antigravityBalanceConsent.supported && state.antigravityBalanceConsent.consented &&
-      this.availability.get("antigravity")?.ok && createModel === EXPERIMENTAL_LIMIT_MODEL &&
+      this.availability.get("antigravity")?.ok && balanceMapping !== null &&
       (!agent?.model || agent.model === createModel) && !agent?.modelConflict && !agent?.nativeSession && !agent?.continuedFrom;
     const balanceCandidate = (current: StoredState) => {
       const balanceState = { ...current, antigravityAccountGenerations: Object.fromEntries(current.accounts.map((entry) =>
@@ -611,7 +612,7 @@ export class Service {
         const reading = this.antigravityReadings.get(id);
         if (!reading) return null;
         const usage = experimentalAntigravityBalanceUsage(createModel, reading.usage);
-        return usage ? { ...reading, usage, scopeId: EXPERIMENTAL_LIMIT_SCOPE, bucketIds: EXPERIMENTAL_LIMIT_BUCKETS } : null;
+        return usage && balanceMapping ? { ...reading, usage, ...balanceMapping } : null;
       }, Date.now());
     };
     const balanced = canBalance ? balanceCandidate(state) : undefined;

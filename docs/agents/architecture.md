@@ -80,7 +80,7 @@ Antigravity는 native `agy`만 대상으로 관리 HOME·XDG 경로를 분리하
 환경에서 `/usage` JSON으로 읽고, 그룹은 `UsageWindow.scope`와 `StoredAccount.scopedLimits`로
 보존한다. 한 그룹의 소진을 계정 전체 한도로 기록하지 않는다. 정확한 모델 대응이 없는
 그룹은 표시만 하며 일반 자동 선택의 근거로 사용하지 않는다. 실험적 자동 인계와 독립적인
-신규 에이전트 선택은 실측에 기반한 단일 모델·그룹 가정을 별도로 적용한다.
+신규 에이전트 선택은 Gemini·Claude·GPT 모델 계열의 실험적 그룹 가정을 별도로 적용한다.
 Accounts 화면은 그룹명·공유 사용량·리셋 시각을 표시한다. 모델의 그룹 소속을 확인하지
 못한 내부 상태를 사용량 누락 경고나 개별 모델 잔량처럼 표시하지 않는다.
 공유 여부는 `homes.ts`의 private 정책이 기준이다. 예를 들어 Codex의 `plugins`는 private 목록에

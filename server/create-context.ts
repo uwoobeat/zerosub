@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { PluginBeforeRequests, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
-import { EXPERIMENTAL_LIMIT_MODEL } from "./antigravity";
+import { experimentalAntigravityBalanceMapping } from "./antigravity";
 
 export const CREATE_CONTEXT_ENV = "ZEROSUB_CREATE_CONTEXT";
 const TTL_MS = 60_000;
@@ -15,7 +15,7 @@ export class CreateContexts {
     delete env[CREATE_CONTEXT_ENV];
     for (const [key, entry] of this.entries) if (entry.expires <= now) this.entries.delete(key);
     const model = request.config.model?.trim();
-    if (request.config.provider === "antigravity" && model === EXPERIMENTAL_LIMIT_MODEL) {
+    if (request.config.provider === "antigravity" && model && experimentalAntigravityBalanceMapping(model) !== null) {
       while (this.entries.size >= MAX_CONTEXTS) this.entries.delete(this.entries.keys().next().value!);
       const key = randomBytes(24).toString("hex");
       this.entries.set(key, { provider: request.config.provider, cwd: request.config.cwd, model, expires: now + TTL_MS });

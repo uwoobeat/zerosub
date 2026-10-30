@@ -118,12 +118,24 @@ export const EXPERIMENTAL_LIMIT_SCOPE = "claude-and-gpt-models";
 export const EXPERIMENTAL_LIMIT_BUCKETS = ["3p-5h", "3p-weekly"] as const;
 const OBSERVED_LIMIT = /^Individual quota reached\. Please upgrade your subscription to increase your limits\. Resets in (?:\d+[hms])+\.$/;
 
-/** Apply the observed mapping locally, without presenting it as verified provider metadata. */
+/** Experimental new-agent routing assumptions; Argon has its own observed quota group. */
+export function experimentalAntigravityBalanceMapping(model: string | null): { scopeId: string; bucketIds: readonly string[] } | null {
+  if (!model) return null;
+  if (model.startsWith("gemini-4-argon-")) return { scopeId: "gemini-4-argon", bucketIds: ["gemini-argon-wtu-weekly"] };
+  if (model.startsWith("gemini-")) return { scopeId: "gemini-models", bucketIds: ["gemini-5h", "gemini-weekly"] };
+  if (model.startsWith("claude-") || model.startsWith("gpt-")) {
+    return { scopeId: EXPERIMENTAL_LIMIT_SCOPE, bucketIds: EXPERIMENTAL_LIMIT_BUCKETS };
+  }
+  return null;
+}
+
+/** Apply the experimental mapping without changing the original quota snapshot. */
 export function experimentalAntigravityBalanceUsage(model: string | null, usage: Usage): Usage | null {
-  if (model !== EXPERIMENTAL_LIMIT_MODEL) return null;
+  const mapping = experimentalAntigravityBalanceMapping(model);
+  if (!model || !mapping) return null;
   return {
     ...usage,
-    windows: usage.windows.map((window) => window.scope?.id === EXPERIMENTAL_LIMIT_SCOPE
+    windows: usage.windows.map((window) => window.scope?.id === mapping.scopeId
       ? { ...window, scope: { ...window.scope, models: [...new Set([...window.scope.models, model])] } }
       : window),
   };
