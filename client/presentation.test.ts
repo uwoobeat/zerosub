@@ -12,6 +12,7 @@ import {
 import {
   accountUsageNote,
   focusedUsageGroup,
+  groupChipLabel,
   groupMissingNote,
   groupStatus,
   groupUsageNote,
@@ -180,6 +181,13 @@ describe("family support", () => {
 });
 
 describe("usage groups", () => {
+  it("removes the Models suffix from chip labels only", () => {
+    expect(groupChipLabel("Gemini Models")).toBe("Gemini");
+    expect(groupChipLabel("Claude and GPT models")).toBe("Claude and GPT");
+    expect(groupChipLabel("Gemini 4 Argon")).toBe("Gemini 4 Argon");
+    expect(groupChipLabel("Models")).toBe("Models");
+  });
+
   const scoped = [
     window({
       id: "gemini-5h",

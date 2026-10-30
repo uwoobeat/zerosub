@@ -25,6 +25,7 @@ import {
 } from "./family-support";
 import {
   focusedUsageGroup,
+  groupChipLabel,
   groupMissingNote,
   groupStatus,
   groupUsageNote,
@@ -645,7 +646,7 @@ function ScopedUsage({
                       fontWeight: "600",
                     }}
                   >
-                    {group.label}
+                    {groupChipLabel(group.label)}
                   </Text>
                 </Pressable>
               );

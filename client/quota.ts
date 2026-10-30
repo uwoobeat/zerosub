@@ -50,6 +50,11 @@ export function focusedUsageGroup(groups: readonly UsageGroup[], id: string | nu
   return groups.find((group) => group.id === id) ?? groups[0] ?? null;
 }
 
+/** Shorten the group name on its selection chip. */
+export function groupChipLabel(label: string): string {
+  return label.replace(/\s+models\s*$/i, "") || label;
+}
+
 /** The busiest window in this group only. Another group's limit never makes this one look spent. */
 export function groupPeak(group: UsageGroup): UsageWindow | null {
   return peakUsage(group.windows);
