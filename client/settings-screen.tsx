@@ -74,8 +74,8 @@ export function PreferencesScreen({
       <SettingsSection title="Automatic switching">
         <SettingsCard>
           <SettingsSwitch
-            label="Switch Claude and ChatGPT accounts automatically when one hits its limit"
-            hint="Controls automatic account switching for Claude and ChatGPT (Codex)."
+            label="Switch accounts when one hits its limit"
+            hint="Claude and ChatGPT agents move to the account with the most room left."
             value={values.autoSwitch}
             disabled={settings.saving}
             onValueChange={(autoSwitch) => save({ autoSwitch })}
@@ -89,7 +89,7 @@ export function PreferencesScreen({
           />
           {antigravity ? (
             <SettingsSwitch
-              label="Switch Antigravity accounts automatically"
+              label="Switch Antigravity accounts when one hits its limit"
               hint={
                 antigravitySwitch
                   ? "Independent of Claude and ChatGPT switching. Off by default; only supported Antigravity limit events trigger a handoff."
