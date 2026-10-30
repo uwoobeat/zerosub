@@ -36,6 +36,8 @@ function hasActiveScopedLimit(account: StoredAccount, now: number, context: Scop
   if (scopes.size === 0) return false;
   return account.scopedLimits.some((limit) => {
     if (!scopes.has(limit.scopeId)) return false;
+    if (account.family === "antigravity") return true;
+    if (limit.limitedUntil === null) return true;
     const until = Date.parse(limit.limitedUntil);
     return Number.isFinite(until) && until > now;
   });
@@ -61,6 +63,56 @@ export function isUsable(account: StoredAccount, now: number, context: ScopeCont
 export function headroomScore(usage: Usage | null | undefined, model?: string | null): number {
   const peak = usage ? peakUsage(usageWindowsForModel(usage.windows, model)) : null;
   return peak ? peak.usedPercent : 50;
+}
+
+/** A snapshot and independently verified bucket mapping for one account and model. */
+export interface AntigravityBalanceSnapshot {
+  usage: Usage;
+  home: string | null;
+  generation: number;
+  scopeId: string;
+  bucketIds: readonly string[];
+}
+
+/**
+ * Preparation for new-agent routing. Callers must provide verified, account-specific mappings
+ * and snapshot provenance; this function does not establish provider support or create bindings.
+ */
+export function mostAvailableAntigravity(
+  state: StoredState,
+  model: string,
+  snapshotOf: (accountId: string) => AntigravityBalanceSnapshot | null | undefined,
+  now: number,
+): StoredAccount | undefined {
+  if (!model || !Number.isFinite(now)) return undefined;
+  const preferred = defaultAccount(state, "antigravity")?.id;
+  const ranked: Array<{ account: StoredAccount; score: number }> = [];
+  for (const account of accountsOf(state, "antigravity")) {
+    const snapshot = snapshotOf(account.id);
+    const generation = state.antigravityAccountGenerations[account.id];
+    if (!snapshot || generation === undefined || snapshot.generation !== generation || snapshot.home !== account.home ||
+        !account.signedIn || account.disabled || account.limitedUntil !== null) continue;
+    const { usage, scopeId, bucketIds } = snapshot;
+    const fetchedAt = Date.parse(usage.fetchedAt);
+    if (usage.cached || usage.error !== null || !Number.isFinite(fetchedAt) || fetchedAt > now ||
+        now - fetchedAt > 5 * 60_000 || !scopeId || bucketIds.length === 0 ||
+        new Set(bucketIds).size !== bucketIds.length || bucketIds.some((id) => !id) ||
+        account.scopedLimits.some((limit) => limit.scopeId === scopeId)) continue;
+    const windows = usage.windows.filter((window) => window.scope?.id === scopeId);
+    // Reject missing, duplicate, unexpected or conflicting windows rather than borrowing quota.
+    if (windows.length !== bucketIds.length || usage.windows.some((window) =>
+      window.scope?.models.includes(model) && window.scope.id !== scopeId)) continue;
+    if (windows.some((window) => !bucketIds.includes(window.id) || !window.scope?.models.includes(model) ||
+      !Number.isFinite(window.usedPercent) || window.usedPercent < 0 || window.usedPercent >= 100) ||
+      new Set(windows.map((window) => window.id)).size !== bucketIds.length) continue;
+    ranked.push({ account, score: Math.max(...windows.map((window) => window.usedPercent)) });
+  }
+  ranked.sort((a, b) => a.score - b.score ||
+    Number(a.account.id !== preferred) - Number(b.account.id !== preferred) ||
+    Number(a.account.kind !== "main") - Number(b.account.kind !== "main") ||
+    (Date.parse(a.account.createdAt) || 0) - (Date.parse(b.account.createdAt) || 0) ||
+    (a.account.id < b.account.id ? -1 : a.account.id > b.account.id ? 1 : 0));
+  return ranked[0]?.account;
 }
 
 /** The usable account with the most room, preferring the default, then the CLI login, on ties. */

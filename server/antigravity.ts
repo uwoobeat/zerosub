@@ -15,6 +15,7 @@ import {
   type LimitHit,
   type LoginHandle,
   type RedeemReply,
+  type TurnEvent,
 } from "./adapter";
 import { providerCommand } from "./binaries";
 import { prepareAntigravityHome } from "./homes";
@@ -109,6 +110,54 @@ const KNOWN_GROUPS: Record<string, string> = {
  * still show the group; only automatic per-model selection stays off until a real mapping exists.
  */
 const VERIFIED_MODELS: Record<string, readonly string[]> = {};
+
+/** Experimental mapping inferred from one observed limit, not an official model contract. */
+export const EXPERIMENTAL_LIMIT_MODEL = "claude-opus-5-5-high";
+export const EXPERIMENTAL_LIMIT_SCOPE = "claude-and-gpt-models";
+export const EXPERIMENTAL_LIMIT_BUCKETS = ["3p-5h", "3p-weekly"] as const;
+const OBSERVED_LIMIT = /^Individual quota reached\. Please upgrade your subscription to increase your limits\. Resets in (?:\d+[hms])+\.$/;
+
+/** Apply the observed mapping locally, without presenting it as verified provider metadata. */
+export function experimentalAntigravityBalanceUsage(model: string | null, usage: Usage): Usage | null {
+  if (model !== EXPERIMENTAL_LIMIT_MODEL) return null;
+  return {
+    ...usage,
+    windows: usage.windows.map((window) => window.scope?.id === EXPERIMENTAL_LIMIT_SCOPE
+      ? { ...window, scope: { ...window.scope, models: [...new Set([...window.scope.models, model])] } }
+      : window),
+  };
+}
+
+export function isExperimentalAntigravityLimit(event: TurnEvent, model: string | null): boolean {
+  if (!event.turnId || event.outcome.kind !== "failed" || model !== EXPERIMENTAL_LIMIT_MODEL ||
+      !OBSERVED_LIMIT.test(event.outcome.error.message)) return false;
+  const error = event.outcome.error as { scope?: unknown };
+  return error.scope === undefined || error.scope === EXPERIMENTAL_LIMIT_SCOPE;
+}
+
+/**
+ * Prepare a scoped detection for the future automatic path. The caller must independently bind
+ * this event and usage to the same actual session account and prevent stale or duplicate turns.
+ * This helper does not enable failover or change the general usage model mapping.
+ */
+export function experimentalAntigravityLimit(
+  event: TurnEvent,
+  model: string | null,
+  usage: Usage | null,
+  now: number,
+): LimitHit | null {
+  if (!isExperimentalAntigravityLimit(event, model) || event.outcome.kind !== "failed" || !usage || usage.cached || usage.error !== null ||
+      !Number.isFinite(now)) return null;
+  const fetchedAt = Date.parse(usage.fetchedAt);
+  if (!Number.isFinite(fetchedAt) || fetchedAt > now || now - fetchedAt > 5 * 60_000) return null;
+  const windows = usage.windows.filter((window) => window.scope?.id === EXPERIMENTAL_LIMIT_SCOPE);
+  if (windows.length !== EXPERIMENTAL_LIMIT_BUCKETS.length ||
+      windows.some((window) => !EXPERIMENTAL_LIMIT_BUCKETS.some((id) => id === window.id) ||
+        !Number.isFinite(window.usedPercent) || window.usedPercent < 0 || window.usedPercent > 100) ||
+      new Set(windows.map((window) => window.id)).size !== EXPERIMENTAL_LIMIT_BUCKETS.length ||
+      !windows.some((window) => window.usedPercent === 100)) return null;
+  return { kind: "window", scopeId: EXPERIMENTAL_LIMIT_SCOPE, resetsAt: null, message: event.outcome.error.message };
+}
 
 const BucketSchema = z.object({
   id: z.string().min(1).max(160),
@@ -741,12 +790,12 @@ export class AntigravityAdapter implements FamilyAdapter {
    * In-app sign-in is enabled only on Linux, where an independent HOME with an empty D-Bus address
    * was observed to use the official file credential. On macOS the new-login Keychain boundary is
    * not proven, so existing file-backed accounts may still show usage but no managed login is
-   * offered. Automatic switching stays off until a verified model mapping exists.
+   * offered. Automatic switching is experimental and applies only to the observed model and quota.
    */
   readonly capabilities = {
     managedAccounts: process.platform === "linux",
     loginMethods: (process.platform === "linux" ? ["code"] : []) as LoginMethod[],
-    autoSwitch: false,
+    autoSwitch: true,
     resets: false,
     fork: false,
   };
@@ -1064,8 +1113,8 @@ export class AntigravityAdapter implements FamilyAdapter {
 
   /**
    * No verified Antigravity failure frame names a subscription limit and its model scope yet.
-   * Generic 429s, capacity errors and assistant/tool text must not switch accounts, so this stays
-   * null and automatic switching remains off (`capabilities.autoSwitch` is false).
+   * Generic 429s, capacity errors and assistant/tool text must not switch accounts. The service
+   * performs experimental classification only after binding a turn to its account and quota.
    */
   detectLimit(): LimitHit | null {
     return null;

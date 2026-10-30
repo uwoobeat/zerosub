@@ -597,6 +597,24 @@ describe("Codex continuations through the Paseo SDK", () => {
 });
 
 describe("Antigravity continuations through the Paseo SDK", () => {
+  it("delivers an automatic handoff once through the SDK and persists its turn record", async () => {
+    const t = await setupAntigravity();
+    const p = await t.plugin();
+    const auto = {
+      turnId: "failed-turn", openedAt: "now",
+      lastUserMessageAt: t.daemon.agents.get(ROOT)!.snapshot.lastUserMessageAt ?? null,
+      continuePrompt: "Continue", validate: async () => true,
+    };
+    const target = await p.manager.continue(p.paseo, ROOT, t.account("b"), "the model quota ran out", auto);
+    const sends = t.daemon.requests("send_agent_message_request");
+    expect(sends).toHaveLength(1);
+    expect(t.daemon.receipts(target.agentId, sends[0]!.messageId!)).toHaveLength(1);
+    expect((await p.store.read()).antigravityContinuations[ROOT]?.automatic).toEqual([
+      expect.objectContaining({ turnId: "failed-turn", status: "completed" }),
+    ]);
+    t.expectCleanWire(p);
+  });
+
   it("round-trips A→B→A→B with one native tab and incremental, ID-carrying sends", async () => {
     const t = await setupAntigravity();
     const p = await t.plugin();

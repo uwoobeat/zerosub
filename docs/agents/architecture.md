@@ -79,7 +79,8 @@ Antigravity는 native `agy`만 대상으로 관리 HOME·XDG 경로를 분리하
 비운다. 기존 CLI 홈·설정·히스토리·Keychain을 공유하거나 복사하지 않는다. quota도 동일한
 환경에서 `/usage` JSON으로 읽고, 그룹은 `UsageWindow.scope`와 `StoredAccount.scopedLimits`로
 보존한다. 한 그룹의 소진을 계정 전체 한도로 기록하지 않는다. 정확한 모델 대응이 없는
-그룹은 표시만 하며 자동 선택의 근거로 사용하지 않는다.
+그룹은 표시만 하며 일반 자동 선택의 근거로 사용하지 않는다. 실험적 자동 인계는 실측에 기반한
+단일 모델·그룹 가정을 별도로 적용한다.
 Accounts 화면은 그룹명·공유 사용량·리셋 시각을 표시한다. 모델의 그룹 소속을 확인하지
 못한 내부 상태를 사용량 누락 경고나 개별 모델 잔량처럼 표시하지 않는다.
 공유 여부는 `homes.ts`의 private 정책이 기준이다. 예를 들어 Codex의 `plugins`는 private 목록에
@@ -95,9 +96,9 @@ Service·UI의 제공자 목록, 로그인 방식, portability, 권한 대응, �
 확인한다. 모든 제공자를 재검사하는 `listAvailable()`은 다른 CLI의 응답을 기다릴 수 있어
 세션 시작·화면 표시의 확인 경로에 사용하지 않는다. 카탈로그 IPC의 1.5초 제한은 유지한다.
 제공자별 실제 지원 기능은 `FamilyAdapter.capabilities`에서 `StateView.capabilities`로 전달하며
-UI와 Service 양쪽에서 검사한다. Antigravity의 자동 전환·reset·다른 제공자로 fork는 현재
-비활성이고, 계정 간 이력 이동 대신 기존 continuation 경로를 사용한다. 일반 설정이 켜져
-있어도 Antigravity 자동 동작을 활성화하지 않는다.
+UI와 Service 양쪽에서 검사한다. Antigravity 자동 전환은 별도 opt-in이 기본적으로 꺼진
+실험 기능이며 실측에 기반한 단일 모델·그룹만 지원한다. 계정 간 이력 이동 대신 continuation을
+사용한다. reset·다른 제공자로 fork는 비활성이며 일반 설정만으로 AGY 자동 동작이 켜지지 않는다.
 
 관련 안전 규칙은 [서버 지침](../../server/AGENTS.md), 검증 방법은
 [검증 절차](verification.md)를 읽는다.

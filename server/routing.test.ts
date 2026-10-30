@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Usage } from "../shared/model";
 import { applyEnv } from "./adapter";
-import { chooseAccount, headroomScore, isLimited, isUsable, mostAvailable } from "./routing";
+import { chooseAccount, headroomScore, isLimited, isUsable, mostAvailable, mostAvailableAntigravity, type AntigravityBalanceSnapshot } from "./routing";
 import { emptyState, type StoredAccount, type StoredState } from "./state";
 
 const NOW = Date.parse("2026-09-23T12:00:00Z");
@@ -241,10 +241,12 @@ describe("model-scoped limits", () => {
     expect(isUsable(blocked, NOW, { model: "claude-4", usage: current })).toBe(true);
   });
 
-  it("ignores an expired scoped limit", () => {
+  it("keeps an Antigravity scoped limit until a fresh reading confirms recovery", () => {
     const recovered = antigravity("antigravity-a", [scopedLimit("gemini", "2026-09-23T11:00:00Z")]);
     const current = groupedUsage({ unscoped: 5, gemini: 100 });
-    expect(isLimited(recovered, NOW, { model: "gemini-3-pro", usage: current })).toBe(false);
+    expect(isLimited(recovered, NOW, { model: "gemini-3-pro", usage: current })).toBe(true);
+    recovered.scopedLimits[0]!.limitedUntil = null;
+    expect(isLimited(recovered, NOW, { model: "gemini-3-pro", usage: current })).toBe(true);
   });
 });
 
@@ -301,6 +303,95 @@ describe("scope-aware headroom", () => {
         : groupedUsage({ unscoped: 5, gemini: 5, third: 5, argon: 0 });
 
     expect(mostAvailable(state, "antigravity", usageOf, NOW)?.id).toBe(a.id);
+  });
+});
+
+describe("Antigravity new-agent candidate preparation", () => {
+  const a = account({ id: "a", family: "antigravity", kind: "main", home: null });
+  const b = account({ id: "b", family: "antigravity" });
+  const state = stateWith([a, b], { antigravityAccountGenerations: { a: 1, b: 2 } });
+  const snapshot = (candidate: StoredAccount, values: number[]): AntigravityBalanceSnapshot => ({
+    home: candidate.home,
+    generation: candidate.id === "a" ? 1 : 2,
+    scopeId: GEMINI.id,
+    bucketIds: values.map((_, index) => `bucket-${index}`),
+    usage: {
+      ...usage(0),
+      windows: values.map((value, index) => ({
+        id: `bucket-${index}`, label: "window", usedPercent: value, resetsAt: null,
+        scope: { ...GEMINI, models: [...GEMINI.models] },
+      })),
+    },
+  });
+  const select = (first: AntigravityBalanceSnapshot | null, second: AntigravityBalanceSnapshot | null, current = state) =>
+    mostAvailableAntigravity(current, "gemini-3-pro", (id) => id === "a" ? first : second, NOW);
+
+  it("compares the unrounded maximum of the verified windows only", () => {
+    const first = snapshot(a, [20, 80]);
+    const second = snapshot(b, [45, 35]);
+    second.usage.windows.push({ id: "other", label: "other", usedPercent: 100, resetsAt: null, scope: { ...THIRD_PARTY, models: [...THIRD_PARTY.models] } });
+    expect(select(first, second)?.id).toBe("b");
+    expect(select(snapshot(a, [20.01]), snapshot(b, [20.02]))?.id).toBe("a");
+  });
+
+  it("requires a complete fresh snapshot with matching authentication provenance", () => {
+    const valid = snapshot(a, [20, 30]);
+    const variants: AntigravityBalanceSnapshot[] = [
+      { ...valid, home: "/old" }, { ...valid, generation: 0 },
+      { ...valid, bucketIds: ["bucket-0", "missing"] },
+      { ...valid, usage: { ...valid.usage, cached: true } },
+      { ...valid, usage: { ...valid.usage, error: "failed" } },
+      { ...valid, usage: { ...valid.usage, fetchedAt: new Date(NOW + 1).toISOString() } },
+      { ...valid, usage: { ...valid.usage, fetchedAt: new Date(NOW - 300_001).toISOString() } },
+      snapshot(a, [100]), snapshot(a, [NaN]),
+    ];
+    for (const candidate of variants) expect(select(candidate, null)).toBeUndefined();
+    expect(select({ ...valid, usage: { ...valid.usage, fetchedAt: new Date(NOW - 300_000).toISOString() } }, null)?.id).toBe("a");
+    expect(select(valid, null, stateWith([a]))).toBeUndefined();
+  });
+
+  it("excludes unknown models, incomplete or duplicate buckets and exhausted accounts", () => {
+    const valid = snapshot(a, [0]);
+    expect(mostAvailableAntigravity(state, "unknown-model", (id) => id === "a" ? valid : null, NOW)).toBeUndefined();
+    expect(select({ ...valid, bucketIds: [] }, null)).toBeUndefined();
+    expect(select({ ...valid, bucketIds: ["bucket-0", "bucket-0"] }, null)).toBeUndefined();
+    expect(select(snapshot(a, [100]), snapshot(b, [100]))).toBeUndefined();
+    expect(select({ ...valid, usage: { ...valid.usage, windows: [] } }, null)).toBeUndefined();
+    expect(select({ ...valid, usage: { ...valid.usage, fetchedAt: "invalid" } }, null)).toBeUndefined();
+    expect(select(valid, null, { ...state, accounts: [{ ...a, disabled: true }, b] })).toBeUndefined();
+    expect(select(valid, null, { ...state, accounts: [{ ...a, signedIn: false }, b] })).toBeUndefined();
+    expect(select(valid, null)?.id).toBe("a");
+  });
+
+  it("accepts independently verified bucket sets for each account", () => {
+    const first = snapshot(a, [30]);
+    const second = snapshot(b, [20, 25]);
+    second.bucketIds = ["other-short", "other-long"];
+    second.usage.windows = second.usage.windows.map((window, index) => ({
+      ...window, id: second.bucketIds[index]!,
+    }));
+    expect(select(first, second)?.id).toBe("b");
+    second.usage.windows.pop();
+    expect(select(first, second)?.id).toBe("a");
+  });
+
+  it("rejects conflicting mappings and limits even after their reset time", () => {
+    const conflict = snapshot(a, [10]);
+    conflict.usage.windows.push({ ...conflict.usage.windows[0]!, id: "other", scope: { ...GEMINI, id: "other", models: [...GEMINI.models] } });
+    expect(select(conflict, null)).toBeUndefined();
+    const limited = { ...a, scopedLimits: [scopedLimit("gemini", "2026-09-23T11:00:00Z")] };
+    expect(select(snapshot(a, [10]), null, { ...state, accounts: [limited, b] })).toBeUndefined();
+    expect(select(snapshot(a, [10]), null, { ...state, accounts: [{ ...a, limitedUntil: "2026-09-23T11:00:00Z" }, b] })).toBeUndefined();
+  });
+
+  it("breaks ties by default, CLI login, creation date, then ID", () => {
+    expect(select(snapshot(a, [10]), snapshot(b, [10]))?.id).toBe("a");
+    expect(select(snapshot(a, [10]), snapshot(b, [10]), { ...state, defaults: { ...state.defaults, antigravity: "b" } })?.id).toBe("b");
+    const aa = { ...a, kind: "managed" as const };
+    const preferred = account({ id: "preferred", family: "antigravity", signedIn: false });
+    const withPreferred = { ...state, accounts: [b, aa, preferred], defaults: { ...state.defaults, antigravity: preferred.id } };
+    expect(select(snapshot(a, [10]), snapshot(b, [10]), withPreferred)?.id).toBe("a");
+    expect(select(snapshot(a, [10]), snapshot(b, [10]), { ...withPreferred, accounts: [{ ...b, createdAt: "2026-01-01T00:00:00Z" }, aa, preferred] })?.id).toBe("b");
   });
 });
 

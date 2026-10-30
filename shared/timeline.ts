@@ -28,6 +28,8 @@ export const SwitchRowSchema = z.object({
   ]),
   /** When the exhausted account frees up again, if known. */
   resetsAt: z.string().nullable(),
+  /** Name of the shared usage group, when the limit is not account-wide. */
+  scopeLabel: z.string().optional(),
   /** A follow-up was sent so the interrupted turn continues. */
   continued: z.boolean(),
   /** The conversation could not move in place and carries on in this new agent. */

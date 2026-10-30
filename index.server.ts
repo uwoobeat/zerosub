@@ -52,7 +52,7 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.on("agent.turn_started", (event, context) => {
-    void service.onTurnStarted(event.agent, context).catch(() => undefined);
+    void service.onTurnStarted(event.agent, context, event.turnId).catch(() => undefined);
   });
 
   // Failover can take longer than a hook invocation is allowed to, so it runs in the background.

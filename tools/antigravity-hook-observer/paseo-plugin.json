@@ -1,0 +1,4 @@
+{
+  "id": "zerosub-agy-observer",
+  "requirements": { "paseo": ">=0.9.1" }
+}

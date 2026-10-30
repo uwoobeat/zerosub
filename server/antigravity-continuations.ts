@@ -159,6 +159,15 @@ interface Gathered {
   contextVerified: boolean;
 }
 
+export interface AntigravityAutomaticHandoff {
+  turnId: string;
+  openedAt: string;
+  lastUserMessageAt: string | null;
+  continuePrompt: string;
+  /** Recheck settings, turn attribution and candidate eligibility immediately before delivery. */
+  validate(): Promise<boolean>;
+}
+
 /** Account-bound Antigravity tabs for one task. This state and lock chain are separate from Codex. */
 export class AntigravityContinuations {
   private readonly locks = new Map<string, { mutex: Mutex; users: number }>();
@@ -171,11 +180,12 @@ export class AntigravityContinuations {
     sourceAgentId: string,
     target: StoredAccount,
     why: string,
+    automatic?: AntigravityAutomaticHandoff,
   ): Promise<{ agentId: string; title: string }> {
-    const key = `${sourceAgentId}:${target.id}`;
+    const key = `${sourceAgentId}:${target.id}:${automatic ? `auto:${automatic.openedAt}:${automatic.turnId}` : "manual"}`;
     const existing = this.inFlight.get(key);
     if (existing) return existing;
-    const task = this.dispatch(paseo, sourceAgentId, target, why).finally(() => this.inFlight.delete(key));
+    const task = this.dispatch(paseo, sourceAgentId, target, why, automatic).finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, task);
     return task;
   }
@@ -240,6 +250,7 @@ export class AntigravityContinuations {
     sourceAgentId: string,
     target: StoredAccount,
     why: string,
+    automatic?: AntigravityAutomaticHandoff,
   ): Promise<{ agentId: string; title: string }> {
     const original = await snapshot(paseo, sourceAgentId);
     if (!original || original.archivedAt) throw new Error("The original Antigravity agent is no longer available.");
@@ -250,6 +261,7 @@ export class AntigravityContinuations {
       if (!chain.members[sourceAgentId]) {
         throw new Error("This Antigravity tab is no longer part of the task. Switch accounts from the task's current tab.");
       }
+      if (automatic && chain.pending) throw new Error("An earlier Antigravity handoff is still pending. Check its target tab first.");
       const settled = await this.settlePending(paseo, task.root, chain, target.id);
       if ("done" in settled) return settled.done;
       const reserved = settled.reserved;
@@ -265,6 +277,19 @@ export class AntigravityContinuations {
         throw new Error("The Antigravity account changed during the handoff. Check the active tab and try again.");
       }
       const snapshots = await memberSnapshots(paseo, chain, sourceAgent);
+      if (automatic) {
+        if (sourceAgent.lastUserMessageAt !== automatic.lastUserMessageAt) throw new Error("The task received a newer instruction.");
+        const sourceTime = Date.parse(sourceAgent.lastUserMessageAt ?? "");
+        const newer = [...snapshots.values()].some((member) => member.id !== sourceAgentId &&
+          Number.isFinite(Date.parse(member.lastUserMessageAt ?? "")) &&
+          (!Number.isFinite(sourceTime) || Date.parse(member.lastUserMessageAt ?? "") > sourceTime));
+        const activeTime = Date.parse(snapshots.get(chain.activeAgentId)?.lastUserMessageAt ?? "");
+        if (newer || (chain.activeAgentId !== sourceAgentId &&
+          (!Number.isFinite(sourceTime) || !Number.isFinite(activeTime) || sourceTime <= activeTime))) {
+          throw new Error("This task continues in another Antigravity tab.");
+        }
+        if (!await automatic.validate()) throw new Error("The automatic Antigravity switch is no longer valid.");
+      }
       const destination = pickDestination(latest, chain, snapshots, sourceAgent, current, reserved);
       const expectedGeneration = latest.antigravityAccountGenerations[current.id] ?? 0;
       let targetHistoryMissing = false;
@@ -273,7 +298,7 @@ export class AntigravityContinuations {
         targetHistoryMissing = !hasTaskContext(chain, destination.targetId, targetHistory);
       }
       const gathered = await gatherUpdates(paseo, latest, chain, snapshots, sourceAgent, destination, targetHistoryMissing);
-      const prompt = composePrompt(chain, destination, gathered, why);
+      const prompt = composePrompt(chain, destination, gathered, why) || (automatic?.continuePrompt ?? "");
       if (destination.agent && !prompt) {
         await this.store.update((draft) => {
           const currentChain = draft.antigravityContinuations[task.root]!;
@@ -289,9 +314,28 @@ export class AntigravityContinuations {
       }
       const messageId = reserved?.messageId ?? `${MESSAGE_PREFIX}${randomUUID()}`;
       await this.confirmUnchanged(paseo, chain, snapshots, sourceAgent, destination, current, expectedGeneration);
+      if (automatic) {
+        if (!await automatic.validate()) throw new Error("The automatic Antigravity switch is no longer valid.");
+        await this.store.update((draft) => {
+          const currentChain = draft.antigravityContinuations[task.root]!;
+          const now = Date.now();
+          const history = currentChain.automatic ?? [];
+          if (history.some((entry) => entry.sourceAgentId === sourceAgentId && entry.turnId === automatic.turnId && entry.openedAt === automatic.openedAt)) {
+            throw new Error("This Antigravity turn was already handled automatically.");
+          }
+          if (history.filter((entry) => entry.at > now - 10 * 60_000).length >= 4) throw new Error("This Antigravity task switched too often. Pick an account manually.");
+          currentChain.automatic = [...history.slice(-49), { sourceAgentId, turnId: automatic.turnId, openedAt: automatic.openedAt, at: now, status: "reserved" }];
+        });
+      }
       await this.reserve(task.root, sourceAgent, destination, gathered, current, messageId, prompt, expectedGeneration);
       const reservedChain = (await this.store.read()).antigravityContinuations[task.root]!;
-      return this.deliver(paseo, task.root, reservedChain, snapshots, sourceAgent, destination, current, prompt, messageId, why, expectedGeneration);
+      const result = await this.deliver(paseo, task.root, reservedChain, snapshots, sourceAgent, destination, current, prompt, messageId, why, expectedGeneration, automatic);
+      if (automatic) await this.store.update((draft) => {
+        const entry = draft.antigravityContinuations[task.root]?.automatic?.find((item) =>
+          item.sourceAgentId === sourceAgentId && item.turnId === automatic.turnId && item.openedAt === automatic.openedAt);
+        if (entry) entry.status = "completed";
+      });
+      return result;
     });
   }
 
@@ -318,7 +362,7 @@ export class AntigravityContinuations {
       if (!members[sourceAgentId]) {
         throw new Error("Couldn't establish this Antigravity tab's account. Reopen it before switching.");
       }
-      draft.antigravityContinuations[root] = { activeAgentId: sourceAgentId, members };
+      draft.antigravityContinuations[root] = { activeAgentId: sourceAgentId, members, automatic: [] };
     });
     return next.antigravityContinuations[root]!;
   }
@@ -488,6 +532,7 @@ export class AntigravityContinuations {
     messageId: string,
     why: string,
     expectedGeneration: number,
+    automatic?: AntigravityAutomaticHandoff,
   ): Promise<{ agentId: string; title: string }> {
     const targetId = destination.targetId;
     if (chain.pending?.agentId !== targetId || chain.pending.messageId !== messageId) {
@@ -534,6 +579,7 @@ export class AntigravityContinuations {
           state.antigravityContinuations[root]?.pending?.agentId === targetId && reservedFor(state, targetId, account.id)))) {
       throw new Error("The Antigravity account was re-authenticated before the handoff arrived. Check the target tab before retrying.");
     }
+    if (automatic && !await automatic.validate()) throw new Error("The automatic Antigravity switch is no longer valid.");
     await this.store.update((draft) => { draft.antigravityContinuations[root]!.pending!.stage = "sending"; });
     // A failed or disconnected send leaves the reservation in place; a retry first looks for its receipt.
     await paseo.agents.ref(targetId).send(prompt, { messageId });

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { UsageSchema } from "../shared/model";
-import { applyEnv, spawnEnv } from "./adapter";
+import { applyEnv, spawnEnv, type FamilyAdapter } from "./adapter";
 import {
   AntigravityAdapter,
   AntigravityQuotaError,
@@ -13,6 +13,8 @@ import {
   antigravityLoginEnv,
   asksForDa2,
   buildLoginScriptCommand,
+  experimentalAntigravityBalanceUsage,
+  experimentalAntigravityLimit,
   parseAntigravityUsage,
   readAntigravityIdentityClaims,
   shellQuote,
@@ -371,7 +373,7 @@ describe("Antigravity environment and capabilities", () => {
     }
   });
 
-  it("reports Linux-only sign-in, no automatic switching and no resets", async () => {
+  it("reports Linux-only sign-in, experimental automatic switching and no resets", async () => {
     const adapter = new AntigravityAdapter();
     expect(adapter.family).toBe("antigravity");
     expect(adapter.portable).toBe(false);
@@ -379,7 +381,7 @@ describe("Antigravity environment and capabilities", () => {
     expect(adapter.capabilities).toMatchObject({
       managedAccounts: process.platform === "linux",
       loginMethods: process.platform === "linux" ? ["code"] : [],
-      autoSwitch: false,
+      autoSwitch: true,
       resets: false,
       fork: false,
     });
@@ -387,6 +389,62 @@ describe("Antigravity environment and capabilities", () => {
     expect(adapter.detectSignOut()).toBeNull();
     await expect(adapter.redeemReset()).resolves.toMatchObject({ outcome: "unavailable", left: null });
     await expect(adapter.login(null, "browser")).rejects.toThrow(/code flow|Linux only/);
+  });
+
+  it("does not automatically classify the observed quota error without verified turn scope", () => {
+    const adapter: FamilyAdapter = new AntigravityAdapter();
+    // Observed in a Paseo 0.14.0 agent's lastError with agy 1.4.10; the hook envelope is synthetic.
+    expect(adapter.detectLimit({
+      turnId: "synthetic-turn",
+      outcome: { kind: "failed", error: { message: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h53m56s." } },
+      timeline: [],
+    })).toBeNull();
+    expect(adapter.capabilities?.autoSwitch).toBe(true);
+  });
+});
+
+describe("experimental Antigravity balance mapping", () => {
+  it("maps only the observed model and group without altering the original quota", () => {
+    const usage = UsageSchema.parse({
+      fetchedAt: FIXED_AT, cached: false, error: null, resets: null,
+      windows: [
+        { id: "3p-5h", label: "5 hours", usedPercent: 20, resetsAt: null,
+          scope: { id: "claude-and-gpt-models", label: "Claude", models: ["another-model"] } },
+        { id: "other", label: "Other", usedPercent: 10, resetsAt: null,
+          scope: { id: "other", label: "Other", models: ["claude-opus-5-5-high"] } },
+      ],
+    });
+    const mapped = experimentalAntigravityBalanceUsage("claude-opus-5-5-high", usage)!;
+    expect(mapped.windows[0]?.scope?.models).toEqual(["another-model", "claude-opus-5-5-high"]);
+    expect(mapped.windows[1]).toEqual(usage.windows[1]);
+    expect(usage.windows[0]?.scope?.models).toEqual(["another-model"]);
+    expect(experimentalAntigravityBalanceUsage("claude-opus-5-5-low", usage)).toBeNull();
+    expect(experimentalAntigravityBalanceUsage(null, usage)).toBeNull();
+  });
+});
+
+describe("experimental Antigravity limit evidence", () => {
+  it("requires the observed failure, model, complete fresh quota and an exhausted window", () => {
+    const now = Date.parse(FIXED_AT);
+    const event = {
+      turnId: "turn-1",
+      outcome: { kind: "failed" as const, error: { message: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h53m56s." } },
+      timeline: [],
+    };
+    const usage = parseAntigravityUsage(rawResponse(fullGroups()), { fetchedAt: FIXED_AT });
+    usage.windows[3]!.usedPercent = 100;
+    const model = "claude-opus-5-5-high";
+    expect(experimentalAntigravityLimit(event, model, usage, now)).toMatchObject({ kind: "window", scopeId: "claude-and-gpt-models" });
+    expect(experimentalAntigravityLimit({ ...event, turnId: null }, model, usage, now)).toBeNull();
+    expect(experimentalAntigravityLimit({ ...event, outcome: { kind: "canceled", reason: "user" } }, model, usage, now)).toBeNull();
+    expect(experimentalAntigravityLimit({ ...event, outcome: { kind: "failed", error: { message: "429 RESOURCE_EXHAUSTED" } } }, model, usage, now)).toBeNull();
+    expect(experimentalAntigravityLimit(event, "claude-opus-5-5-low", usage, now)).toBeNull();
+    expect(experimentalAntigravityLimit(event, model, { ...usage, cached: true }, now)).toBeNull();
+    expect(experimentalAntigravityLimit(event, model, { ...usage, error: "failed" }, now)).toBeNull();
+    expect(experimentalAntigravityLimit(event, model, usage, now + 300_001)).toBeNull();
+    expect(experimentalAntigravityLimit(event, model, usage, now - 1)).toBeNull();
+    expect(experimentalAntigravityLimit(event, model, { ...usage, windows: usage.windows.filter((w) => w.id !== "3p-weekly") }, now)).toBeNull();
+    expect(experimentalAntigravityLimit(event, model, { ...usage, windows: usage.windows.map((w) => ({ ...w, usedPercent: 50 })) }, now)).toBeNull();
   });
 });
 

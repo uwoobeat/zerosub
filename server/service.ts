@@ -33,6 +33,7 @@ import {
 } from "./adapter";
 import { bringsOwnAuth, FamilyResolver } from "./families";
 import { AntigravityContinuations } from "./antigravity-continuations";
+import { EXPERIMENTAL_LIMIT_BUCKETS, EXPERIMENTAL_LIMIT_MODEL, EXPERIMENTAL_LIMIT_SCOPE, experimentalAntigravityBalanceUsage, experimentalAntigravityLimit, isExperimentalAntigravityLimit } from "./antigravity";
 import { CodexContinuations } from "./continuations";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
@@ -45,7 +46,7 @@ import { homesDir } from "./paths";
 import { Reopener } from "./reopen";
 import { SwitchGuard } from "./switch-guard";
 import { loadReadings, mergeUsage, saveReadings, showLimit } from "./usage";
-import { chooseAccount, isLimited, isUsable, mostAvailable } from "./routing";
+import { chooseAccount, isLimited, isUsable, mostAvailable, mostAvailableAntigravity } from "./routing";
 import {
   MAIN_ACCOUNT_ID,
   StateStore,
@@ -129,6 +130,16 @@ interface AgentInfo {
 
 type ReopenOutcome = "reopened" | "deferred" | "closed" | "failed";
 type Problem = { kind: "limit"; hit: LimitHit } | { kind: "signed_out" };
+type AntigravityTurn = {
+  turnId: string;
+  accountId: string;
+  openedAt: string;
+  home: string | null;
+  generation: number;
+  model: string;
+  lastUserMessageAt: string | null;
+  revision: number;
+};
 
 /** The agent has a running CLI session (idle between turns counts). */
 function isLive(status: string): boolean {
@@ -153,6 +164,10 @@ export class Service {
   private readonly logins = new Map<string, LoginSession>();
   private readonly loginLocks: Record<Family, Mutex> = { claude: new Mutex(), codex: new Mutex(), antigravity: new Mutex() };
   private readonly agentModels = new Map<string, string | null>();
+  /** Captured before awaiting a start hook; a later turn invalidates the older capture. */
+  private readonly antigravityTurns = new Map<string, { turnId: string; capture: Promise<AntigravityTurn | null> }>();
+  private readonly antigravityTurnRevisions = new Map<string, number>();
+  private readonly antigravityReadings = new Map<string, { home: string | null; generation: number; usage: Usage }>();
   private readonly continuationLocks = new Map<string, Mutex>();
   /** Agents whose account changed mid-turn; reopened when the turn ends. */
   private readonly deferred = new Map<string, SwitchRow | null>();
@@ -316,24 +331,40 @@ export class Service {
 
   private async refreshIdentity(accountId: string): Promise<void> {
     const sinceUsage = Date.now() - (this.usageAttemptAt.get(accountId) ?? 0);
-    this.identityCheckedAt.set(accountId, Date.now());
-    const account = findAccount(await this.store.read(), accountId);
+    const state = await this.store.read();
+    const account = findAccount(state, accountId);
     if (!account) return;
-    if (!(await this.canReadAccount(account))) return;
+    const generation = state.antigravityAccountGenerations[accountId] ?? 0;
+    const markAttempt = async () => {
+      if (account.family !== "antigravity") return;
+      const latest = await this.store.read();
+      const current = findAccount(latest, accountId);
+      if (current?.family === "antigravity" && current.home === account.home &&
+          (latest.antigravityAccountGenerations[accountId] ?? 0) === generation) {
+        this.identityCheckedAt.set(accountId, Date.now());
+      }
+    };
+    if (account.family !== "antigravity") this.identityCheckedAt.set(accountId, Date.now());
+    if (!(await this.canReadAccount(account))) { await markAttempt(); return; }
     // Antigravity verifies identity via quota; its identity refresh must respect the same minimum
     // spacing as usage, even when an explicit refresh requests both at once.
-    if (account.family === "antigravity" && sinceUsage < this.adapter(account.family).usageSpacingMs) return;
+    if (account.family === "antigravity" && sinceUsage < this.adapter(account.family).usageSpacingMs) { await markAttempt(); return; }
     const identity = await this.adapter(account.family).identity(account.home).catch(() => null);
-    if (!identity) return;
+    if (!identity) { await markAttempt(); return; }
+    let applied = false;
     await this.store.update((draft) => {
       const target = findAccount(draft, accountId);
       if (target) {
+        if (account.family === "antigravity" && (target.family !== "antigravity" || target.home !== account.home ||
+          (draft.antigravityAccountGenerations[accountId] ?? 0) !== generation)) return;
         if (reauthenticated(target, identity)) {
           draft.antigravityAccountGenerations[accountId] = (draft.antigravityAccountGenerations[accountId] ?? 0) + 1;
         }
         applyIdentity(target, identity, draft);
+        applied = true;
       }
     });
+    if (applied && account.family === "antigravity") this.identityCheckedAt.set(accountId, Date.now());
   }
 
   /** Forget bindings and sessions of agents that no longer exist (including Paseo's internal helpers). */
@@ -475,7 +506,14 @@ export class Service {
     this.agentModels.set(request.agentId, model);
     const now = Date.now();
     const state = await this.store.read();
-    const decision = chooseAccount(state, {
+    const reserved = family === "antigravity" ? Object.values(state.antigravityContinuations)
+      .find((chain) => chain.pending?.agentId === request.agentId && chain.members[request.agentId]?.unstarted)?.pending : undefined;
+    const reservedAccount = reserved && state.bindings[request.agentId]?.accountId === reserved.accountId
+      ? findAccount(state, reserved.accountId) : undefined;
+    if (reserved && (!reservedAccount || reservedAccount.family !== "antigravity")) return undefined;
+    const decision = reservedAccount?.family === "antigravity"
+      ? { account: reservedAccount, bind: null, skipped: null }
+      : chooseAccount(state, {
       agentId: request.agentId,
       family,
       reason: request.reason,
@@ -485,7 +523,7 @@ export class Service {
       portable: adapter.portable,
       usageOf: (id) => this.usage.get(id),
       model,
-    });
+      });
     if (!decision) return undefined;
     const { account } = decision;
 
@@ -552,20 +590,163 @@ export class Service {
   }
 
   /** A turn uses the account from its first token, so a long one keeps its usage fresh too. */
-  async onTurnStarted(agent: { id: string; provider: string }, context: PluginHookContext): Promise<void> {
+  async onTurnStarted(agent: { id: string; provider: string }, context: PluginHookContext, turnId?: string | null): Promise<void> {
     this.attach(context.paseo);
+    const revision = (this.antigravityTurnRevisions.get(agent.id) ?? 0) + 1;
+    this.antigravityTurnRevisions.set(agent.id, revision);
+    if (agent.provider === "antigravity" && turnId) {
+      const capture = this.captureAntigravityTurn(agent.id, turnId, context.paseo, revision).catch(() => null);
+      this.antigravityTurns.set(agent.id, { turnId, capture });
+    } else {
+      this.antigravityTurns.delete(agent.id);
+    }
     const family = (await this.families.resolve(context.paseo))[agent.provider];
     if (!family) return;
     const accountId = this.runningOn(await this.store.read(), agent.id, family);
     if (accountId) this.activeAt.set(accountId, Date.now());
   }
 
+  private async captureAntigravityTurn(agentId: string, turnId: string, paseo: PaseoApi, revision: number): Promise<AntigravityTurn | null> {
+    const state = await this.store.read();
+    const session = state.sessions[agentId];
+    if (!session || session.family !== "antigravity") return null;
+    const account = findAccount(state, session.accountId);
+    if (!account || account.family !== "antigravity") return null;
+    const generation = state.antigravityAccountGenerations[account.id] ?? 0;
+    if ((session.authGeneration ?? 0) !== generation || (session.authHome ?? null) !== account.home) return null;
+    const agent = (await paseo.agents.ref(agentId).refresh())?.agent;
+    if (!agent || agent.provider !== "antigravity" || agent.archivedAt) return null;
+    const model = agent.model ?? agent.runtimeInfo?.model;
+    if (!model || (agent.model && agent.runtimeInfo?.model && agent.model !== agent.runtimeInfo.model)) return null;
+    const latest = await this.store.read();
+    const current = latest.sessions[agentId];
+    const currentAccount = findAccount(latest, account.id);
+    if (!current || current.family !== "antigravity" || current.accountId !== account.id ||
+        current.openedAt !== session.openedAt || (current.authGeneration ?? 0) !== generation ||
+        (current.authHome ?? null) !== account.home || currentAccount?.home !== account.home ||
+        (latest.antigravityAccountGenerations[account.id] ?? 0) !== generation) return null;
+    return { turnId, accountId: account.id, openedAt: session.openedAt, home: account.home, generation,
+      model, lastUserMessageAt: agent.lastUserMessageAt ?? null, revision };
+  }
+
+  private async validAntigravityTurn(paseo: PaseoApi, agentId: string, turn: AntigravityTurn): Promise<boolean> {
+    if (!this.autoSwitchFor("antigravity") || this.antigravityTurnRevisions.get(agentId) !== turn.revision) return false;
+    const state = await this.store.read();
+    const session = state.sessions[agentId];
+    const account = findAccount(state, turn.accountId);
+    if (!session || session.family !== "antigravity" || session.accountId !== turn.accountId ||
+        session.openedAt !== turn.openedAt || (session.authHome ?? null) !== turn.home ||
+        (session.authGeneration ?? 0) !== turn.generation || !account || account.family !== "antigravity" ||
+        account.home !== turn.home || !account.signedIn || account.disabled ||
+        (state.antigravityAccountGenerations[turn.accountId] ?? 0) !== turn.generation) return false;
+    const agent = (await paseo.agents.ref(agentId).refresh())?.agent;
+    return Boolean(agent && !agent.archivedAt && agent.provider === "antigravity" &&
+      (agent.model ?? agent.runtimeInfo?.model) === turn.model &&
+      (!agent.model || !agent.runtimeInfo?.model || agent.model === agent.runtimeInfo.model) &&
+      (agent.lastUserMessageAt ?? null) === turn.lastUserMessageAt &&
+      this.antigravityTurnRevisions.get(agentId) === turn.revision && this.autoSwitchFor("antigravity"));
+  }
+
+  private async eligibleAntigravityTarget(sourceId: string, targetId?: string): Promise<StoredAccount | undefined> {
+    const state = await this.store.read();
+    const eligibleState: StoredState = {
+      ...state,
+      accounts: state.accounts.filter((account) => account.id !== sourceId && (!targetId || account.id === targetId)),
+      antigravityAccountGenerations: Object.fromEntries(state.accounts.map((account) =>
+        [account.id, state.antigravityAccountGenerations[account.id] ?? 0])),
+    };
+    return mostAvailableAntigravity(eligibleState, EXPERIMENTAL_LIMIT_MODEL, (id) => {
+      const reading = this.antigravityReadings.get(id);
+      if (!reading) return null;
+      return {
+        ...reading,
+        scopeId: EXPERIMENTAL_LIMIT_SCOPE,
+        bucketIds: EXPERIMENTAL_LIMIT_BUCKETS,
+        usage: experimentalAntigravityBalanceUsage(EXPERIMENTAL_LIMIT_MODEL, reading.usage)!,
+      };
+    }, Date.now());
+  }
+
+  private async handleAntigravityLimit(paseo: PaseoApi, event: TurnEnded, turn: AntigravityTurn): Promise<void> {
+    const agentId = event.agent.id;
+    if (!await this.validAntigravityTurn(paseo, agentId, turn)) return;
+    await withTimeout(this.refreshUsage(turn.accountId, true), 15_000);
+    const reading = this.antigravityReadings.get(turn.accountId);
+    if (!reading || reading.home !== turn.home || reading.generation !== turn.generation ||
+        !experimentalAntigravityLimit(event, turn.model, reading.usage, Date.now()) ||
+        !await this.validAntigravityTurn(paseo, agentId, turn)) return;
+    const state = await this.store.read();
+    const source = findAccount(state, turn.accountId);
+    if (!source) return;
+    const note = async (detail: string, target?: StoredAccount, continuedIn?: { agentId: string; title: string }) => {
+      await this.appendRow(paseo, agentId, {
+        family: "antigravity", from: source.label, to: target?.label ?? source.label,
+        reason: "limit", scopeLabel: "Claude and GPT models",
+        resetsAt: source.scopedLimits.find((limit) => limit.scopeId === EXPERIMENTAL_LIMIT_SCOPE)?.limitedUntil ?? null,
+        continued: Boolean(continuedIn), continuedIn: continuedIn ?? null, toFamily: null,
+        outcome: continuedIn ? "continued" : "stayed", detail, at: new Date().toISOString(),
+      });
+    };
+    if (!this.prefs.autoContinue) {
+      await note("Automatic continuation is off. Pick an account to continue.");
+      return;
+    }
+    const ids = accountsOf(state, "antigravity").filter((account) => account.id !== turn.accountId && account.signedIn && !account.disabled).map((account) => account.id);
+    const end = Date.now() + 15_000;
+    let next = 0;
+    const refreshCandidates = async () => {
+      while (next < ids.length && Date.now() < end) {
+        const id = ids[next++];
+        if (id) await this.refreshUsage(id, true).catch(() => undefined);
+      }
+    };
+    await withTimeout(Promise.all([refreshCandidates(), refreshCandidates()]), 15_000);
+    if (!await this.validAntigravityTurn(paseo, agentId, turn)) return;
+    const target = await this.eligibleAntigravityTarget(turn.accountId);
+    if (!target) {
+      await note("No eligible account with a fresh reading was confirmed. Refresh usage or choose an account manually.");
+      return;
+    }
+    try {
+      const continued = await this.antigravityContinuations.continue(paseo, agentId, target, "the Claude and GPT model quota ran out", {
+        turnId: turn.turnId,
+        openedAt: turn.openedAt,
+        lastUserMessageAt: turn.lastUserMessageAt,
+        continuePrompt: this.prefs.continuePrompt,
+        validate: async () => this.prefs.autoContinue && await this.validAntigravityTurn(paseo, agentId, turn) &&
+          Boolean(await this.eligibleAntigravityTarget(turn.accountId, target.id)),
+      });
+      await note("", target, continued);
+    } catch (error) {
+      log("Antigravity automatic handoff stopped", error);
+      const pending = Object.values((await this.store.read()).antigravityContinuations)
+        .find((chain) => chain.pending?.sourceAgentId === agentId)?.pending;
+      await note(pending
+        ? `Automatic continuation could not be confirmed. Check destination tab ${pending.agentId} before retrying.`
+        : "Automatic continuation stopped. Check the task tabs and choose an account if needed.", target);
+    }
+  }
+
   async onTurnEnded(event: TurnEnded, context: PluginHookContext): Promise<void> {
     this.attach(context.paseo);
+    const capture = this.antigravityTurns.get(event.agent.id);
+    if (capture?.turnId === event.turnId) this.antigravityTurns.delete(event.agent.id);
     const family = (await this.families.resolve(context.paseo))[event.agent.provider];
     if (!family) return;
     const adapter = this.adapter(family);
     const agentId = event.agent.id;
+    if (family === "antigravity" && this.autoSwitchFor(family)) {
+      if (capture?.turnId === event.turnId) {
+        const turn = await deadline(capture.capture, 3_000, "Antigravity turn context was not available").catch(() => null);
+        if (turn && isExperimentalAntigravityLimit(event, turn.model)) {
+          await this.handleAntigravityLimit(context.paseo, event, turn);
+        }
+      }
+      if (this.deferred.has(agentId)) await this.finishDeferred(context.paseo, agentId, family);
+      const accountId = this.runningOn(await this.store.read(), agentId, family);
+      if (accountId) void this.refreshUsage(accountId).catch(() => undefined);
+      return;
+    }
     const accountId = this.runningOn(await this.store.read(), agentId, family);
     if (accountId) this.activeAt.set(accountId, Date.now());
     if (event.outcome.kind !== "canceled") {
@@ -615,6 +796,8 @@ export class Service {
   }
 
   async onAgentArchived(agentId: string): Promise<void> {
+    this.antigravityTurns.delete(agentId);
+    this.antigravityTurnRevisions.delete(agentId);
     this.agentModels.delete(agentId);
     this.deferred.delete(agentId);
     this.switchGuard.forget(agentId);
@@ -1476,8 +1659,10 @@ export class Service {
     if (now < (this.usageRetryAt.get(accountId) ?? 0)) return Promise.resolve();
     const since = now - (this.usageAttemptAt.get(accountId) ?? 0);
     const task = (async () => {
-      const account = findAccount(await this.store.read(), accountId);
+      const initialState = await this.store.read();
+      const account = findAccount(initialState, accountId);
       if (!account) return;
+      const generation = initialState.antigravityAccountGenerations[accountId] ?? 0;
       if (!(await this.canReadAccount(account))) return;
       const spacing = this.adapter(account.family).usageSpacingMs;
       if (since < (force ? spacing : Math.max(spacing, 60_000))) return;
@@ -1487,6 +1672,17 @@ export class Service {
         .catch(
           (error: unknown): UsageRead => ({ fetchedAt: new Date().toISOString(), windows: [], error: describe(error), cached: false, resets: null }),
         );
+      if (account.family === "antigravity") {
+        const latest = await this.store.read();
+        const current = findAccount(latest, accountId);
+        if (!current || current.family !== "antigravity" || current.home !== account.home ||
+            (latest.antigravityAccountGenerations[accountId] ?? 0) !== generation) return;
+        if (!usage.cached && !usage.error && usage.windows.length > 0) {
+          this.antigravityReadings.set(accountId, { home: account.home, generation, usage });
+        } else {
+          this.antigravityReadings.delete(accountId);
+        }
+      }
       if (retryAt) this.usageRetryAt.set(accountId, retryAt);
       else this.usageRetryAt.delete(accountId);
       this.setUsage(accountId, mergeUsage(this.usage.get(accountId), usage));
@@ -1494,7 +1690,7 @@ export class Service {
       if (usage.windows.length === 0 || usage.error || usage.cached) return;
       const now = Date.now();
       if (account.family === "antigravity") {
-        await this.updateScopedLimits(accountId, usage, now);
+        await this.updateScopedLimits(accountId, usage, now, account.home, generation);
         return;
       }
       const full = usage.windows.find((window) => window.usedPercent >= 100 && window.resetsAt && Date.parse(window.resetsAt) > now);
@@ -1520,7 +1716,7 @@ export class Service {
   }
 
   /** Shared model quotas never turn into an account-wide subscription limit. */
-  private async updateScopedLimits(accountId: string, usage: Usage, now: number): Promise<void> {
+  private async updateScopedLimits(accountId: string, usage: Usage, now: number, home: string | null, generation: number): Promise<void> {
     const groups = new Map<string, Usage["windows"]>();
     for (const quota of usage.windows) {
       if (!quota.scope) continue;
@@ -1531,24 +1727,26 @@ export class Service {
     if (groups.size === 0) return;
     await this.store.update((draft) => {
       const account = findAccount(draft, accountId);
-      if (!account) return;
-      // Retire expired scopes no longer reported; a missing group alone cannot refute a fresh
-      // notification, and budget limits are never cleared from quota readings.
-      account.scopedLimits = account.scopedLimits.filter((limit) => limit.kind === "budget" || groups.has(limit.scopeId) ||
-        Date.parse(limit.limitedUntil) > now || Date.parse(usage.fetchedAt) < Date.parse(limit.limitedAt));
+      if (!account || account.family !== "antigravity" || account.home !== home ||
+          (draft.antigravityAccountGenerations[accountId] ?? 0) !== generation) return;
+      // A missing group or elapsed reset time does not establish that its quota recovered.
       for (const [scopeId, windows] of groups) {
         const existing = account.scopedLimits.find((limit) => limit.scopeId === scopeId);
         if (existing?.kind === "budget") continue;
         // A delayed read cannot undo a newer limit notification.
         if (existing && Date.parse(usage.fetchedAt) < Date.parse(existing.limitedAt)) continue;
-        const resets = windows.filter((quota) => quota.usedPercent >= 100 && quota.resetsAt && Date.parse(quota.resetsAt) > now)
-          .map((quota) => quota.resetsAt as string).sort((a, b) => Date.parse(b) - Date.parse(a));
-        const until = resets[0];
-        if (until) {
+        const full = windows.filter((quota) => quota.usedPercent >= 100);
+        const resets = full.map((quota) => quota.resetsAt);
+        const until = resets.every((at) => at !== null && Number.isFinite(Date.parse(at)) && Date.parse(at) > now)
+          ? (resets as string[]).sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null
+          : null;
+        if (full.length > 0) {
           if (existing?.limitedUntil === until) continue;
           account.scopedLimits = account.scopedLimits.filter((limit) => limit.scopeId !== scopeId);
           account.scopedLimits.push({ scopeId, limitedUntil: until, limitedAt: new Date(now).toISOString(), kind: "window" });
-        } else if (existing && now - Date.parse(existing.limitedAt) > LIMIT_TRUST_MS && windows.every((quota) => quota.usedPercent < 90)) {
+        } else if (existing && now - Date.parse(existing.limitedAt) > LIMIT_TRUST_MS &&
+          (scopeId !== EXPERIMENTAL_LIMIT_SCOPE || EXPERIMENTAL_LIMIT_BUCKETS.every((id) => windows.some((window) => window.id === id))) &&
+          windows.every((quota) => quota.usedPercent < 90)) {
           account.scopedLimits = account.scopedLimits.filter((limit) => limit.scopeId !== scopeId);
         }
       }

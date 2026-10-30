@@ -11,7 +11,7 @@ export type ScopedLimitKind = z.infer<typeof ScopedLimitKindSchema>;
 export const ScopedLimitSchema = z.object({
   /** The `UsageWindow.scope.id` this limit belongs to. */
   scopeId: z.string(),
-  limitedUntil: z.string(),
+  limitedUntil: z.string().nullable(),
   limitedAt: z.string(),
   kind: ScopedLimitKindSchema,
 });
@@ -123,6 +123,14 @@ const AntigravityContinuationMemberSchema = z.object({
 const AntigravityContinuationSchema = z.object({
   activeAgentId: z.string(),
   members: z.record(z.string(), AntigravityContinuationMemberSchema),
+  /** Automatic attempts are shared across tabs and survive plugin restart. */
+  automatic: z.array(z.object({
+    sourceAgentId: z.string(),
+    turnId: z.string(),
+    openedAt: z.string(),
+    at: z.number().finite(),
+    status: z.enum(["reserved", "completed"]),
+  })).optional(),
   /** First handoff carrying inherited task context, retained if its source tab is pruned. */
   baselineMessageId: z.string().optional(),
   /** Initial source cursor, used to verify that its history still has the original epoch. */

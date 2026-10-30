@@ -10,7 +10,7 @@ function cause(row: SwitchRow): string | null {
   const from = row.from ?? "The previous account";
   switch (row.reason) {
     case "limit":
-      return `${from} hit its usage limit${reset ? ` (resets ${reset})` : ""}.`;
+      return `${from} hit ${row.scopeLabel ? `its ${row.scopeLabel} usage limit` : "its usage limit"}${reset ? ` (resets ${reset})` : ""}.`;
     case "signed_out":
       return `${from} is signed out — sign it in again from Accounts.`;
     case "removed":
@@ -56,7 +56,9 @@ export function describeRow(row: SwitchRow): string {
   switch (row.outcome) {
     case "continued":
       return row.continuedIn
-        ? `${lead}This conversation can't change accounts in place, so this task continues in “${row.continuedIn.title}” on ${row.to}.`
+        ? row.family === "antigravity"
+          ? `${lead}This task continues in “${row.continuedIn.title}” on ${row.to}.`
+          : `${lead}This conversation can't change accounts in place, so this task continues in “${row.continuedIn.title}” on ${row.to}.`
         : `${lead}Continuing on ${row.to}.`;
     case "stayed":
       return `${lead}This conversation stays on ${row.from ?? "its account"}.${row.detail ? ` ${row.detail}` : ""}`;

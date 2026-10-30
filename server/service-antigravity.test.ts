@@ -54,7 +54,7 @@ async function setup(autoSwitch = false) {
     draft.accounts = [stored(MAIN), stored(A), stored(B)];
     draft.defaults.antigravity = A;
   });
-  const usage = vi.fn(async () => reading([]));
+  const usage = vi.fn<FamilyAdapter["usage"]>(async () => reading([]));
   const prepareHome = vi.fn(async (_home: string) => undefined);
   const login = vi.fn<FamilyAdapter["login"]>(async () => { throw new Error("not in this test"); });
   const redeemReset = vi.fn<FamilyAdapter["redeemReset"]>(async () => ({ outcome: "none", message: "none", left: null }));
@@ -153,6 +153,21 @@ async function setup(autoSwitch = false) {
 }
 
 describe("Antigravity service integration", () => {
+  it("captures the actual session and model for each turn and keeps a newer capture on a late end", async () => {
+    const { service, store, open, paseo, agent } = await setup();
+    await open();
+    agent.model = "claude-opus-5-5-high";
+    await service.onTurnStarted(agent, { paseo } as never, "first");
+    const first = await service["antigravityTurns"].get(AGENT)?.capture;
+    expect(first).toMatchObject({ turnId: "first", accountId: A, home: stored(A).home, model: agent.model });
+    await service.onTurnStarted(agent, { paseo } as never, "second");
+    await service.onTurnEnded({ agent, turnId: "first", outcome: { kind: "canceled", reason: "user" }, timeline: [] } as never, { paseo } as never);
+    expect(service["antigravityTurns"].get(AGENT)?.turnId).toBe("second");
+    await store.update((draft) => { draft.antigravityAccountGenerations[A] = (draft.antigravityAccountGenerations[A] ?? 0) + 1; });
+    await service.onTurnStarted(agent, { paseo } as never, "third");
+    expect(await service["antigravityTurns"].get(AGENT)?.capture).toBeNull();
+  });
+
   it("routes new sessions and quota through the selected private home without querying usage on the hook", async () => {
     const { service, store, usage, open, paseo } = await setup();
     const request = await open();
@@ -215,7 +230,10 @@ describe("Antigravity service integration", () => {
     const { usage, service, store } = await setup();
     usage.mockResolvedValue(reading([{ ...quota("argon", "argon-model", 100), resetsAt: null }, quota("third-party", "claude-model", 100, new Date(Date.now() - 1000).toISOString())]));
     await service.refreshUsage(A, true);
-    expect((await store.read()).accounts.find((entry) => entry.id === A)?.scopedLimits).toEqual([]);
+    expect((await store.read()).accounts.find((entry) => entry.id === A)?.scopedLimits).toEqual([
+      expect.objectContaining({ scopeId: "argon", limitedUntil: null }),
+      expect.objectContaining({ scopeId: "third-party", limitedUntil: null }),
+    ]);
   });
 
   it("stops refreshing subscriptions after the provider leaves subscription routing", async () => {
@@ -271,6 +289,73 @@ describe("Antigravity service integration", () => {
     expect((await store.read()).accounts.find((entry) => entry.id === A)?.scopedLimits.map((limit) => limit.scopeId)).toEqual(["fresh", "budget"]);
   });
 
+  it("does not apply a quota read started before reauthentication", async () => {
+    const { usage, service, store } = await setup();
+    let finish!: (value: Usage) => void;
+    let started!: () => void;
+    const hasStarted = new Promise<void>((resolve) => { started = resolve; });
+    usage.mockImplementationOnce(() => {
+      started();
+      return new Promise<Usage>((resolve) => { finish = resolve; });
+    });
+    const refresh = service.refreshUsage(A, true);
+    await hasStarted;
+    await store.update((draft) => { draft.antigravityAccountGenerations[A] = (draft.antigravityAccountGenerations[A] ?? 0) + 1; });
+    finish(reading([quota("argon", "argon-model", 100)]));
+    await refresh;
+    expect((await store.read()).accounts.find((entry) => entry.id === A)?.scopedLimits).toEqual([]);
+    expect(service["usage"].has(A)).toBe(false);
+  });
+
+  it.each(["generation", "home", "deleted"] as const)("discards a late identity after %s changes", async (change) => {
+    const { adapter, service, store } = await setup();
+    let finish!: (value: Awaited<ReturnType<FamilyAdapter["identity"]>>) => void;
+    let started!: () => void;
+    const hasStarted = new Promise<void>((resolve) => { started = resolve; });
+    adapter.identity = vi.fn(() => {
+      started();
+      return new Promise<Awaited<ReturnType<FamilyAdapter["identity"]>>>((resolve) => { finish = resolve; });
+    });
+    const refresh = service["refreshIdentity"](A);
+    await hasStarted;
+    await store.update((draft) => {
+      if (change === "generation") draft.antigravityAccountGenerations[A] = 1;
+      if (change === "home") draft.accounts.find((account) => account.id === A)!.home = "/new-home";
+      if (change === "deleted") draft.accounts = draft.accounts.filter((account) => account.id !== A);
+    });
+    finish({ signedIn: false, email: "old@example.invalid", plan: null, organization: null, identity: "old" });
+    await refresh;
+    const state = await store.read();
+    const account = state.accounts.find((item) => item.id === A);
+    if (change === "deleted") expect(account).toBeUndefined();
+    else expect(account).toMatchObject({ signedIn: true, email: null, identity: null });
+    expect(state.antigravityAccountGenerations[A] ?? 0).toBe(change === "generation" ? 1 : 0);
+    expect(service["identityCheckedAt"].has(A)).toBe(false);
+  });
+
+  it("still applies an identity read for the current authentication generation", async () => {
+    const { adapter, service, store } = await setup();
+    adapter.identity = vi.fn(async () => ({ signedIn: true, email: "current@example.invalid", plan: null, organization: null, identity: "current" }));
+    await service["refreshIdentity"](A);
+    expect((await store.read()).accounts.find((account) => account.id === A)).toMatchObject({
+      signedIn: true, email: "current@example.invalid", identity: "current",
+    });
+    expect(service["identityCheckedAt"].has(A)).toBe(true);
+  });
+
+  it("retains an expired scope when a fresh reading omits its group", async () => {
+    const { usage, service, store } = await setup();
+    await store.update((draft) => {
+      draft.accounts.find((entry) => entry.id === A)!.scopedLimits = [{
+        scopeId: "missing", limitedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        limitedUntil: new Date(Date.now() - 1_000).toISOString(), kind: "window",
+      }];
+    });
+    usage.mockResolvedValue(reading([quota("other", "other-model", 10)]));
+    await service.refreshUsage(A, true);
+    expect((await store.read()).accounts.find((entry) => entry.id === A)?.scopedLimits.map((limit) => limit.scopeId)).toEqual(["missing"]);
+  });
+
   it.each([{ cached: true }, { error: "quota unavailable" }])("never persists a limit from an untrusted reading %o", async (extra) => {
     const { usage, service, store } = await setup();
     usage.mockResolvedValue(reading([quota("argon", "argon-model", 100)], extra));
@@ -297,6 +382,72 @@ describe("Antigravity service integration", () => {
     expect((await store.read()).accounts.find((entry) => entry.id === A)?.limitedUntil).toBeNull();
     expect(created).not.toHaveBeenCalled();
     expect(reopened).not.toHaveBeenCalled();
+  });
+
+  it("automatically hands off a matched failed turn to a fresh eligible account", async () => {
+    const { service, agent, usage, open, paseo, created, sent, store } = await setup(true);
+    agent.model = "claude-opus-5-5-high";
+    service.setPreferences(preferences.schema.parse({ antigravityAutoSwitch: true, autoSwitch: true, autoContinue: true }));
+    usage.mockImplementation(async (home) => {
+      const remaining = home === stored(A).home ? 0 : home === stored(B).home ? 0.9 : 0.2;
+      return parseAntigravityUsage({ status: "SUCCESS", num_turns: 0, command: { name: "usage", data: { groups: [
+        { name: "Claude and GPT models", buckets: [
+          { id: "3p-5h", window: "5h", remaining_fraction: remaining, reset_time: new Date(Date.now() + 60_000).toISOString() },
+          { id: "3p-weekly", window: "weekly", remaining_fraction: 0.5, reset_time: new Date(Date.now() + 3_600_000).toISOString() },
+        ] },
+      ] } } });
+    });
+    await open();
+    await service.onTurnStarted(agent, { paseo } as never, "failed-turn");
+    const event = { agent, turnId: "failed-turn", outcome: { kind: "failed", error: { message: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h53m56s." } }, timeline: [] } as never;
+    await service.onTurnEnded(event, { paseo } as never);
+    expect(created).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1);
+    expect((await store.read()).bindings[sent[0]!.id]?.accountId).toBe(B);
+    expect((await store.read()).sessions[AGENT]?.accountId).toBe(A);
+    await service.onTurnEnded(event, { paseo } as never);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("does not use a failure without a matching started turn", async () => {
+    const { service, agent, open, paseo, created, usage } = await setup(true);
+    agent.model = "claude-opus-5-5-high";
+    service.setPreferences(preferences.schema.parse({ antigravityAutoSwitch: true, autoSwitch: true }));
+    await open();
+    await service.onTurnEnded({ agent, turnId: "unknown", outcome: { kind: "failed", error: {
+      message: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h53m56s.",
+    } }, timeline: [] } as never, { paseo } as never);
+    expect(created).not.toHaveBeenCalled();
+    // The ordinary post-turn upkeep may read quota, but it cannot start a handoff.
+    expect(usage.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it("preserves a reserved destination account when its session opens", async () => {
+    const { store, service, paseo } = await setup(true);
+    await store.update((draft) => {
+      draft.accounts.find((account) => account.id === B)!.limitedUntil = new Date(Date.now() + 60_000).toISOString();
+      draft.bindings.target = { accountId: B, source: "thread", at: "now" };
+      draft.antigravityContinuations[AGENT] = {
+        activeAgentId: AGENT,
+        members: { target: { accountId: B, home: stored(B).home, identity: null, email: null, generation: 0, configKey: "test", seen: {}, unstarted: true } },
+        pending: { agentId: "target", sourceAgentId: AGENT, accountId: B, messageId: "reserved", prompt: "test", seen: {}, observed: {}, stage: "creating" },
+      };
+    });
+    service.setPreferences(preferences.schema.parse({ antigravityAutoSwitch: true, autoSwitch: true }));
+    const request = await service.onSessionOpen({ agentId: "target", provider: "antigravity", reason: "create", purpose: "interactive", env: {}, cwd: "/work" } as never, { paseo } as never);
+    expect(request?.env.HOME).toBe(stored(B).home);
+    expect((await store.read()).sessions.target?.accountId).toBe(B);
+  });
+
+  it("retains a known group limit when a later reading omits a required bucket", async () => {
+    const { usage, service, store } = await setup();
+    await store.update((draft) => {
+      draft.accounts.find((entry) => entry.id === A)!.scopedLimits = [{ scopeId: "claude-and-gpt-models",
+        limitedAt: new Date(Date.now() - 3_600_000).toISOString(), limitedUntil: null, kind: "window" }];
+    });
+    usage.mockResolvedValue(reading([{ ...quota("claude-and-gpt-models", "claude-opus-5-5-high", 5), id: "3p-5h" }]));
+    await service.refreshUsage(A, true);
+    expect((await store.read()).accounts.find((entry) => entry.id === A)?.scopedLimits).toHaveLength(1);
   });
 
   it("doesn't balance real parsed quotas with unknown model mappings", async () => {

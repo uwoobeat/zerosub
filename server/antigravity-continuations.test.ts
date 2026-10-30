@@ -259,6 +259,50 @@ async function setup() {
 }
 
 describe("Antigravity task continuations", () => {
+  it("records automatic handoffs across restarts and refuses an already handled turn", async () => {
+    const t = await setup();
+    const automatic = {
+      turnId: "failed-turn", openedAt: "session-1", lastUserMessageAt: t.agents.get("root")!.lastUserMessageAt ?? null,
+      continuePrompt: "Continue", validate: async () => true,
+    };
+    await t.makeManager().continue(t.paseo, "root", t.accounts[1]!, "the model quota ran out", automatic);
+    expect((await t.store.read()).antigravityContinuations.root?.automatic).toEqual([
+      expect.objectContaining({ sourceAgentId: "root", turnId: "failed-turn", openedAt: "session-1", status: "completed" }),
+    ]);
+    const restarted = await t.restart();
+    await expect(restarted.continue(t.paseo, "root", t.accounts[1]!, "quota", automatic)).rejects.toThrow();
+    expect(t.sends).toHaveLength(1);
+  });
+
+  it("rechecks automatic eligibility before dispatch and leaves the source untouched when invalid", async () => {
+    const t = await setup();
+    await expect(t.makeManager().continue(t.paseo, "root", t.accounts[1]!, "quota", {
+      turnId: "failed-turn", openedAt: "session-1", lastUserMessageAt: t.agents.get("root")!.lastUserMessageAt ?? null,
+      continuePrompt: "Continue", validate: async () => false,
+    })).rejects.toThrow(/no longer valid/);
+    expect(t.created).toHaveLength(0);
+    expect(t.sends).toHaveLength(0);
+  });
+
+  it("shares the automatic switch limit across tabs after a restart", async () => {
+    const t = await setup();
+    const b = await t.switchTo("root", "b");
+    t.agents.get(b.agentId)!.lastUserMessageAt = null;
+    await t.store.update((draft) => {
+      const chain = draft.antigravityContinuations.root!;
+      chain.activeAgentId = "root";
+      chain.automatic = Array.from({ length: 4 }, (_, index) => ({
+        sourceAgentId: index % 2 ? b.agentId : "root", turnId: `old-${index}`, openedAt: "session", at: Date.now(), status: "completed" as const,
+      }));
+    });
+    const manager = await t.restart();
+    await expect(manager.continue(t.paseo, "root", t.accounts[2]!, "quota", {
+      turnId: "next", openedAt: "session", lastUserMessageAt: t.agents.get("root")!.lastUserMessageAt ?? null,
+      continuePrompt: "Continue", validate: async () => true,
+    })).rejects.toThrow(/switched too often/);
+    expect(t.sends).toHaveLength(1);
+  });
+
   it("reuses A and B tabs and sends only the updates a parked tab has not received", async () => {
     const t = await setup();
     const b = await t.switchTo("root", "b");
