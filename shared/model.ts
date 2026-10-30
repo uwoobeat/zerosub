@@ -147,6 +147,7 @@ export type LoginMethod = z.infer<typeof LoginMethodSchema>;
  * every account, login or failover path is implemented for it yet.
  */
 export const FamilyCapabilitiesSchema = z.object({
+  balanceNewAgents: z.boolean().optional(),
   /** Isolated credential homes can be created and routed per account. */
   managedAccounts: z.boolean(),
   /** Sign-in flows this deployment can complete. */
@@ -189,6 +190,12 @@ export const StateViewSchema = z.object({
    * safe defaults rather than assuming every account feature works.
    */
   capabilities: z.record(z.string(), FamilyCapabilitiesSchema).default({}),
+  antigravityBalance: z.object({
+    supported: z.boolean(),
+    available: z.boolean(),
+    consentRequired: z.boolean(),
+    revision: z.number().int().nonnegative(),
+  }).optional(),
   /** Live sessions can be reopened on another account without waiting for the next session start. */
   canReopen: z.boolean(),
   /**

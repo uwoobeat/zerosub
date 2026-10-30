@@ -334,6 +334,14 @@ describe("Antigravity new-agent candidate preparation", () => {
     expect(select(snapshot(a, [20.01]), snapshot(b, [20.02]))?.id).toBe("a");
   });
 
+  it("honors account-wide windows without borrowing another group's quota", () => {
+    const first = snapshot(a, [10]);
+    first.usage.windows.push({ id: "account", label: "Account", usedPercent: 95, resetsAt: null });
+    expect(select(first, snapshot(b, [30]))?.id).toBe("b");
+    first.usage.windows[1]!.usedPercent = 100;
+    expect(select(first, null)).toBeUndefined();
+  });
+
   it("requires a complete fresh snapshot with matching authentication provenance", () => {
     const valid = snapshot(a, [20, 30]);
     const variants: AntigravityBalanceSnapshot[] = [

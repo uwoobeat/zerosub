@@ -6,6 +6,7 @@ import type { Usage, UsageWindow } from "../shared/model";
 import { preferences } from "../shared/preferences";
 import type { EnvPatch, FamilyAdapter } from "./adapter";
 import { parseAntigravityUsage } from "./antigravity";
+import { CreateContexts, CREATE_CONTEXT_ENV } from "./create-context";
 import type { FamilyResolver } from "./families";
 import type { Reopener } from "./reopen";
 import { Service } from "./service";
@@ -73,6 +74,7 @@ async function setup(autoSwitch = false) {
   };
   const children: typeof agent[] = [];
   let incompleteAgentList = false;
+  let agentUnregistered = false;
   const timelines = new Map<string, Array<{ item: { type: "user_message" | "assistant_message"; text: string; clientMessageId?: string }; timestamp: string; seqStart: number; seqEnd: number; turnId?: string }>>();
   timelines.set(AGENT, [{
     item: { type: "user_message", text: "Continue the task" }, timestamp: "2026-10-01T00:00:00Z", seqStart: 1, seqEnd: 1, turnId: "initial-turn",
@@ -92,6 +94,7 @@ async function setup(autoSwitch = false) {
       }),
       ref: (id = AGENT) => ({
         refresh: async () => {
+          if (agentUnregistered) return null;
           const child = children.find((entry) => entry.id === id);
           return { agent: child ?? agent };
         },
@@ -149,10 +152,98 @@ async function setup(autoSwitch = false) {
   return {
     store, service, adapter, usage, prepareHome, login, redeemReset, agent, paseo, open, created, sent, notes, reopened, providerFamilies, timelines,
     set incompleteAgentList(value: boolean) { incompleteAgentList = value; },
+    set agentUnregistered(value: boolean) { agentUnregistered = value; },
   };
 }
 
 describe("Antigravity service integration", () => {
+  it("balances an unregistered agent using its one-use create model and fresh account quotas", async () => {
+    const fixture = await setup();
+    const { service, store, adapter, paseo } = fixture;
+    fixture.agentUnregistered = true;
+    adapter.capabilities!.balanceNewAgents = true;
+    await service["ensureFamily"]("antigravity");
+    service["availability"].set("antigravity", { ok: true, detail: null, at: Date.now() });
+    await service["balanceSupport"]();
+    const revision = (await store.read()).antigravityBalanceConsent.revision;
+    await service.consentAntigravityBalance(revision);
+    service.setPreferences(preferences.schema.parse({ antigravityBalanceNewAgents: true, autoSwitch: false }));
+    const make = (short: number, weekly: number) => reading([
+      { ...quota("claude-and-gpt-models", "", short), id: "3p-5h", scope: { id: "claude-and-gpt-models", label: "Claude", models: [] } },
+      { ...quota("claude-and-gpt-models", "", weekly), id: "3p-weekly", scope: { id: "claude-and-gpt-models", label: "Claude", models: [] } },
+    ]);
+    service["antigravityReadings"].set(A, { home: stored(A).home, generation: 0, usage: make(20, 80) });
+    service["antigravityReadings"].set(B, { home: stored(B).home, generation: 0, usage: make(45, 35) });
+    await store.update((draft) => { draft.antigravityAccountGenerations[A] = 0; draft.antigravityAccountGenerations[B] = 0; });
+    const contexts = new CreateContexts();
+    const create = contexts.issue({ config: { provider: "antigravity", cwd: "/work", model: "claude-opus-5-5-high", modeId: "careful", thinkingOptionId: "high", featureValues: { test: true } }, env: { KEEP: "yes" } });
+    const captured = contexts.consume({ agentId: AGENT, workspaceId: "workspace-a", provider: "antigravity", reason: "create", purpose: "interactive", cwd: "/work", env: create.env! });
+    expect(captured.model).toBe("claude-opus-5-5-high");
+    expect(create.config).toMatchObject({ modeId: "careful", thinkingOptionId: "high", featureValues: { test: true } });
+    expect(captured.request.env[CREATE_CONTEXT_ENV]).toBeUndefined();
+    const opened = await service.onSessionOpen(captured.request, { paseo, signal: new AbortController().signal } as never, captured.model);
+    expect(opened?.env).toMatchObject({ KEEP: "yes", HOME: stored(B).home });
+    const state = await store.read();
+    expect(state.bindings[AGENT]).toMatchObject({ accountId: B, source: "balance" });
+    expect(state.sessions[AGENT]?.accountId).toBe(B);
+    expect(contexts.consume({ ...captured.request, env: create.env! }).model).toBeNull();
+    service["antigravityReadings"].set(B, { home: stored(B).home, generation: 0, usage: make(99, 99) });
+    const resumed = await service.onSessionOpen({ ...captured.request, reason: "resume" }, { paseo, signal: new AbortController().signal } as never);
+    expect(resumed?.env.HOME).toBe(stored(B).home);
+    expect((await store.read()).bindings[AGENT]?.accountId).toBe(B);
+    const retried = await service.onSessionOpen(captured.request, { paseo, signal: new AbortController().signal } as never, captured.model);
+    expect(retried?.env.HOME).toBe(stored(B).home);
+  });
+
+  it.each(["user", "quota"] as const)("rechecks %s changes while a balanced home is prepared", async (change) => {
+    const fixture = await setup();
+    const { service, store, adapter, paseo, prepareHome } = fixture;
+    fixture.agentUnregistered = true;
+    await service["ensureFamily"]("antigravity");
+    adapter.capabilities!.balanceNewAgents = true;
+    service["availability"].set("antigravity", { ok: true, detail: null, at: Date.now() });
+    const state = await service["balanceSupport"]();
+    await service.consentAntigravityBalance(state.antigravityBalanceConsent.revision);
+    service.setPreferences(preferences.schema.parse({ antigravityBalanceNewAgents: true }));
+    const make = (value: number) => reading(["3p-5h", "3p-weekly"].map((id) => ({
+      id, label: id, usedPercent: value, resetsAt: null,
+      scope: { id: "claude-and-gpt-models", label: "Claude", models: [] },
+    })));
+    service["antigravityReadings"].set(A, { home: stored(A).home, generation: 0, usage: make(80) });
+    service["antigravityReadings"].set(B, { home: stored(B).home, generation: 0, usage: make(20) });
+    let finish!: (value: undefined) => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => { started = resolve; });
+    prepareHome.mockImplementationOnce(() => { started(); return new Promise<undefined>((resolve) => { finish = resolve; }); });
+    const request = { agentId: AGENT, workspaceId: null, provider: "antigravity", reason: "create", purpose: "interactive", env: {}, cwd: "/work" } as const;
+    const opened = service.onSessionOpen(request, { paseo, signal: new AbortController().signal } as never, "claude-opus-5-5-high");
+    await waiting;
+    if (change === "user") {
+      await store.update((draft) => { draft.bindings[AGENT] = { accountId: A, source: "user", at: new Date().toISOString() }; });
+    } else {
+      service["antigravityReadings"].set(B, { home: stored(B).home, generation: 0, usage: make(99) });
+    }
+    finish(undefined);
+    expect((await opened)?.env.HOME).toBe(stored(A).home);
+    expect((await store.read()).bindings[AGENT]).toMatchObject({ accountId: A, source: change === "user" ? "user" : "balance" });
+    expect((await store.read()).sessions[AGENT]?.accountId).toBe(A);
+  });
+
+  it("does not record a session when the route times out while preparing a home", async () => {
+    const { service, store, prepareHome, paseo } = await setup();
+    let finish!: (value: undefined) => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => { started = resolve; });
+    prepareHome.mockImplementationOnce(() => { started(); return new Promise<undefined>((resolve) => { finish = resolve; }); });
+    const controller = new AbortController();
+    const request = { agentId: AGENT, workspaceId: null, provider: "antigravity", reason: "create", purpose: "interactive", env: {}, cwd: "/work" } as const;
+    const opened = service.onSessionOpen(request, { paseo, signal: controller.signal } as never);
+    await waiting;
+    controller.abort();
+    finish(undefined);
+    expect(await opened).toBeUndefined();
+    expect((await store.read()).sessions[AGENT]).toBeUndefined();
+  });
   it("captures the actual session and model for each turn and keeps a newer capture on a late end", async () => {
     const { service, store, open, paseo, agent } = await setup();
     await open();
@@ -177,7 +268,7 @@ describe("Antigravity service integration", () => {
     const view = await service.view(paseo as never);
     expect(view.agents[0]).toMatchObject({ family: "antigravity", model: "claude-model", accountId: A });
     await service.refreshUsage(A, true);
-    expect(usage).toHaveBeenCalledWith(stored(A).home, { renewLogin: false });
+    expect(usage).toHaveBeenCalledWith(stored(A).home, expect.objectContaining({ renewLogin: false, quotaContext: expect.any(Object) }));
   });
 
   it("falls back to the CLI login when private-home validation fails, preserving the requested binding", async () => {
@@ -305,6 +396,46 @@ describe("Antigravity service integration", () => {
     await refresh;
     expect((await store.read()).accounts.find((entry) => entry.id === A)?.scopedLimits).toEqual([]);
     expect(service["usage"].has(A)).toBe(false);
+  });
+
+  it("does not join or let an old completion erase a new generation's in-flight quota", async () => {
+    const { usage, service, store } = await setup();
+    const resolvers: Array<(value: Usage) => void> = [];
+    usage.mockImplementation(() => new Promise<Usage>((resolve) => { resolvers.push(resolve); }));
+    const first = service.refreshUsage(A, true);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    await store.update((draft) => { draft.antigravityAccountGenerations[A] = 1; });
+    const second = service.refreshUsage(A, true);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+    resolvers[0]!(reading([quota("argon", "argon-model", 100)]));
+    await first;
+    const third = service.refreshUsage(A, true);
+    await Promise.resolve();
+    expect(usage).toHaveBeenCalledTimes(2);
+    resolvers[1]!(reading([quota("argon", "argon-model", 20)]));
+    await Promise.all([second, third]);
+    expect((await store.read()).accounts.find((entry) => entry.id === A)?.scopedLimits).toEqual([]);
+    expect(service["antigravityReadings"].get(A)?.generation).toBe(1);
+  });
+
+  it("requires fresh consent after explicit support withdrawal, including after restart", async () => {
+    const { service, adapter, store } = await setup();
+    await service["ensureFamily"]("antigravity");
+    service["availability"].set("antigravity", { ok: true, detail: null, at: Date.now() });
+    adapter.capabilities!.balanceNewAgents = true;
+    let state = await service["balanceSupport"]();
+    await service.consentAntigravityBalance(state.antigravityBalanceConsent.revision);
+    adapter.capabilities!.balanceNewAgents = false;
+    state = await service["balanceSupport"]();
+    expect(state.antigravityBalanceConsent.consented).toBe(false);
+    const restored = new StateStore(join(root, "state.json"));
+    expect((await restored.read()).antigravityBalanceConsent.consented).toBe(false);
+    adapter.capabilities!.balanceNewAgents = true;
+    const oldRevision = state.antigravityBalanceConsent.revision;
+    state = await service["balanceSupport"]();
+    await expect(service.consentAntigravityBalance(oldRevision)).rejects.toThrow();
+    await service.consentAntigravityBalance(state.antigravityBalanceConsent.revision);
+    expect((await store.read()).antigravityBalanceConsent.consented).toBe(true);
   });
 
   it.each(["generation", "home", "deleted"] as const)("discards a late identity after %s changes", async (change) => {

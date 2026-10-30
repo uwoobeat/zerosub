@@ -14,6 +14,7 @@ import {
   type Identity,
   type LimitHit,
   type LoginHandle,
+  type QuotaContext,
   type RedeemReply,
   type TurnEvent,
 } from "./adapter";
@@ -796,6 +797,7 @@ export class AntigravityAdapter implements FamilyAdapter {
     managedAccounts: process.platform === "linux",
     loginMethods: (process.platform === "linux" ? ["code"] : []) as LoginMethod[],
     autoSwitch: true,
+    balanceNewAgents: true,
     resets: false,
     fork: false,
   };
@@ -805,6 +807,24 @@ export class AntigravityAdapter implements FamilyAdapter {
   private readonly quotaCache = new Map<string, { at: number; value: AntigravityUsage }>();
   private readonly quotaInFlight = new Map<string, Promise<AntigravityUsage>>();
   private readonly quotaEpoch = new Map<string, number>();
+  private readonly quotaOwners = new Map<string, string>();
+  private quotaRunning = 0;
+  private readonly quotaWaiters: Array<() => void> = [];
+
+  private async quotaSlot<T>(key: string, epoch: number, context: QuotaContext | undefined, runQuota: () => Promise<T>): Promise<T> {
+    if (this.quotaRunning >= 2) await new Promise<void>((resolve) => this.quotaWaiters.push(resolve));
+    else this.quotaRunning += 1;
+    try {
+      if ((this.quotaEpoch.get(key) ?? 0) !== epoch) throw new AntigravityQuotaError("unavailable", "Antigravity quota request was invalidated.");
+      if (context && !await context.valid()) throw new AntigravityQuotaError("unavailable", "Antigravity quota request was invalidated.");
+      if ((this.quotaEpoch.get(key) ?? 0) !== epoch) throw new AntigravityQuotaError("unavailable", "Antigravity quota request was invalidated.");
+      return await runQuota();
+    } finally {
+      const next = this.quotaWaiters.shift();
+      if (next) next();
+      else this.quotaRunning -= 1;
+    }
+  }
 
   /** Drops a home's reading and prevents a currently running old read from filling the cache again. */
   private invalidateQuota(home: string | null): void {
@@ -864,7 +884,7 @@ export class AntigravityAdapter implements FamilyAdapter {
    * never treated as authentication. Without them the account remains usable but its identity is
    * unknown, so duplicate/re-login matching is not guaranteed.
    */
-  async identity(home: string | null): Promise<Identity> {
+  async identity(home: string | null, context?: QuotaContext): Promise<Identity> {
     if (home !== null) {
       // A safe metadata check can definitively say this managed home has no credential, which must
       // surface as signed out so the UI offers sign-in. Unsafe paths and quota/network failures stay
@@ -881,7 +901,7 @@ export class AntigravityAdapter implements FamilyAdapter {
       }
     }
     try {
-      await this.readQuota(home);
+      await this.readQuota(home, context);
     } catch (error) {
       throw asQuotaError(error);
     }
@@ -899,9 +919,9 @@ export class AntigravityAdapter implements FamilyAdapter {
    * `renewLogin` doesn't change anything here: `agy --print /usage` is itself the official CLI
    * path that refreshes an expired sign-in, so ZeroSub never handles a refresh token.
    */
-  async usage(home: string | null, _options: { renewLogin?: boolean } = {}): Promise<AntigravityUsage> {
+  async usage(home: string | null, options: { renewLogin?: boolean; quotaContext?: QuotaContext } = {}): Promise<AntigravityUsage> {
     try {
-      return await this.readQuota(home);
+      return await this.readQuota(home, options.quotaContext);
     } catch (error) {
       // Returning an empty window list lets the Service keep the last good reading and show the error.
       return {
@@ -915,12 +935,20 @@ export class AntigravityAdapter implements FamilyAdapter {
   }
 
   /** One in-flight read per home; a success is reused briefly so identity and usage share one call. */
-  private async readQuota(home: string | null): Promise<AntigravityUsage> {
+  private async readQuota(home: string | null, context?: QuotaContext): Promise<AntigravityUsage> {
     const key = home ?? "";
+    if (context && !await context.valid()) throw new AntigravityQuotaError("unavailable", "Antigravity quota request was invalidated.");
+    if (context && this.quotaOwners.get(key) !== context.key) {
+      this.invalidateQuota(home);
+      this.quotaOwners.set(key, context.key);
+    }
     // Never let a 30-second cache outlive a managed credential. A deleted or unsafe file must fail
     // before the cached success is returned. The main login may use the OS keychain, so a missing
     // file there is not treated as signed out; an unsafe path is still rejected.
     const probe = await probeAntigravityCredential(home);
+    if (context && this.quotaOwners.get(key) !== context.key) {
+      throw new AntigravityQuotaError("unavailable", "Antigravity quota request was invalidated.");
+    }
     if (probe.state === "unsafe" || (home !== null && probe.state === "missing")) {
       this.invalidateQuota(home);
       throw new AntigravityQuotaError(
@@ -937,7 +965,7 @@ export class AntigravityAdapter implements FamilyAdapter {
     if (pending) return pending;
 
     const epoch = this.quotaEpoch.get(key) ?? 0;
-    const task = this.fetchQuota(home);
+    const task = this.quotaSlot(key, epoch, context, () => this.fetchQuota(home));
     this.quotaInFlight.set(key, task);
     task.then(
       (value) => {

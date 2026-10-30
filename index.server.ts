@@ -3,9 +3,11 @@ import { ClaudeAdapter } from "./server/claude";
 import { CodexAdapter } from "./server/codex";
 import { AntigravityAdapter } from "./server/antigravity";
 import { Service, describe } from "./server/service";
+import { CREATE_CONTEXT_ENV, CreateContexts } from "./server/create-context";
 import { preferences } from "./shared/preferences";
 import {
   cancelLogin,
+  consentAntigravityBalance,
   clearAccountLimit,
   getState,
   redeemReset,
@@ -21,6 +23,9 @@ import {
 
 export default function contribute(server: PluginServerContext) {
   const service = new Service({ claude: new ClaudeAdapter(), codex: new CodexAdapter(), antigravity: new AntigravityAdapter() });
+  const createContexts = new CreateContexts();
+
+  server.before("agent.create", ({ request }) => createContexts.issue(request));
 
   const settings = server.registerSettings(preferences);
   const applySettings = (state: PluginSettingsState<typeof preferences.schema>) => {
@@ -34,20 +39,28 @@ export default function contribute(server: PluginServerContext) {
   // Never let routing break or stall an agent: on any error, or if it takes too long (Paseo fails
   // a hook after 30s), the session simply opens on its usual login.
   server.before("agent.session_open", async ({ request }, context) => {
+    const captured = createContexts.consume(request);
+    const fallback = Object.hasOwn(request.env, CREATE_CONTEXT_ENV) ? captured.request : undefined;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    context.signal?.addEventListener("abort", abort, { once: true });
+    if (context.signal?.aborted) controller.abort();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<undefined>((resolve) => {
+    const deadline = new Promise<typeof fallback>((resolve) => {
       timer = setTimeout(() => {
         console.error(`[ZeroSub] routing ${request.agentId} took too long; using the default login`);
-        resolve(undefined);
+        controller.abort();
+        resolve(fallback);
       }, 15_000);
     });
     try {
-      return await Promise.race([service.onSessionOpen(request, context), deadline]);
+      return await Promise.race([service.onSessionOpen(captured.request, { ...context, signal: controller.signal }, captured.model).then((result) => result ?? fallback), deadline]);
     } catch (error) {
       console.error(`[ZeroSub] could not route ${request.agentId}; using the default login`, describe(error));
-      return undefined;
+      return fallback;
     } finally {
       clearTimeout(timer);
+      context.signal?.removeEventListener("abort", abort);
     }
   });
 
@@ -66,6 +79,7 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.handle(getState, ({ refreshUsage }, { paseo }) => service.view(paseo, refreshUsage));
+  server.handle(consentAntigravityBalance, ({ revision }, { paseo }) => { service.attach(paseo); return service.consentAntigravityBalance(revision); });
   server.handle(startLogin, ({ family, method, accountId }, { paseo }) => {
     service.attach(paseo);
     return service.startLogin(family, method, accountId);

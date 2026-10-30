@@ -9,6 +9,7 @@ import {
 import { useState } from "react";
 import { Text } from "react-native";
 import { DEFAULT_CONTINUE_PROMPT, preferences, type Preferences } from "../shared/preferences";
+import { consentAntigravityBalance } from "../shared/rpc";
 import { familyAvailable, normalizeAntigravityAutoSwitch, supportsFamily } from "./family-support";
 import { useStore, type ZeroSubStore } from "./store";
 
@@ -25,6 +26,7 @@ export function PreferencesScreen({
   const antigravity = familyAvailable(state, "antigravity");
   const antigravitySwitch = supportsFamily(state, "antigravity", "autoSwitch");
   const [prompt, setPrompt] = useState<string | null>(null);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   const muted = { color: theme.colors.foregroundMuted };
   if (settings.status === "loading") return <Text style={muted}>Loading…</Text>;
   if (settings.status !== "ready") {
@@ -124,6 +126,28 @@ export function PreferencesScreen({
             disabled={settings.saving}
             onValueChange={(balanceNewAgents) => save({ balanceNewAgents })}
           />
+          {antigravity ? <>
+            <SettingsSwitch
+              label="Start new Antigravity agents on the account with the most room"
+              hint={settings.values.antigravityBalanceNewAgents && state?.antigravityBalance?.consentRequired
+                ? "Support changed; turn this on again to consent. Experimental and limited to new Claude Opus 5.5 high agents."
+                : "Experimental: Claude Opus 5.5 high only. Uses the freshest shared group quota; missing quota falls back to the default. Applies only to new agents."}
+              value={Boolean(settings.values.antigravityBalanceNewAgents && state?.antigravityBalance && !state.antigravityBalance.consentRequired)}
+              disabled={settings.saving || !state?.antigravityBalance?.available || !supportsFamily(state, "antigravity", "balanceNewAgents")}
+              onValueChange={(enabled) => {
+                const revision = state?.antigravityBalance?.revision;
+                setBalanceError(null);
+                void (async () => {
+                  if (!await settings.save({ ...settings.values, antigravityBalanceNewAgents: enabled }, settings.revision)) return;
+                  if (enabled && revision !== undefined) {
+                    try { await store.rpc(consentAntigravityBalance, { revision }); }
+                    catch { setBalanceError("Could not confirm consent. Turn the setting on again when support is available."); }
+                  }
+                })();
+              }}
+            />
+            {balanceError ? <Text style={{ color: theme.colors.statusDanger }}>{balanceError}</Text> : null}
+          </> : null}
           <SettingsSwitch
             label="Use banked resets when every account is out"
             hint="Spends one of the account's banked resets instead of stopping. Off unless you turn it on: resets are scarce."

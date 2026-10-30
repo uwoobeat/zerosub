@@ -99,13 +99,15 @@ export function mostAvailableAntigravity(
         new Set(bucketIds).size !== bucketIds.length || bucketIds.some((id) => !id) ||
         account.scopedLimits.some((limit) => limit.scopeId === scopeId)) continue;
     const windows = usage.windows.filter((window) => window.scope?.id === scopeId);
+    const accountWindows = usage.windows.filter((window) => !window.scope);
     // Reject missing, duplicate, unexpected or conflicting windows rather than borrowing quota.
     if (windows.length !== bucketIds.length || usage.windows.some((window) =>
       window.scope?.models.includes(model) && window.scope.id !== scopeId)) continue;
-    if (windows.some((window) => !bucketIds.includes(window.id) || !window.scope?.models.includes(model) ||
+    if (accountWindows.some((window) => !Number.isFinite(window.usedPercent) || window.usedPercent < 0 || window.usedPercent >= 100) ||
+      windows.some((window) => !bucketIds.includes(window.id) || !window.scope?.models.includes(model) ||
       !Number.isFinite(window.usedPercent) || window.usedPercent < 0 || window.usedPercent >= 100) ||
       new Set(windows.map((window) => window.id)).size !== bucketIds.length) continue;
-    ranked.push({ account, score: Math.max(...windows.map((window) => window.usedPercent)) });
+    ranked.push({ account, score: Math.max(...windows.concat(accountWindows).map((window) => window.usedPercent)) });
   }
   ranked.sort((a, b) => a.score - b.score ||
     Number(a.account.id !== preferred) - Number(b.account.id !== preferred) ||

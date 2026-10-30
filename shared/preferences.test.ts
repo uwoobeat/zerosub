@@ -30,6 +30,7 @@ describe("preferences", () => {
   it("keeps Antigravity auto-switch opt-in without changing the other defaults", () => {
     const saved = preferences.schema.parse({});
     expect(saved.antigravityAutoSwitch).toBe(false);
+    expect(saved.antigravityBalanceNewAgents).toBe(false);
     expect(saved.autoSwitch).toBe(true);
     expect(saved.autoContinue).toBe(true);
     expect(saved.forkOtherProvider).toBe(false);

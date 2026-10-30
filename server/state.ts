@@ -174,6 +174,11 @@ export const StoredStateSchema = z.object({
   antigravityContinuations: z.record(z.string(), AntigravityContinuationSchema).default({}),
   /** Re-authentication epochs let tab reuse reject a session from an earlier login. */
   antigravityAccountGenerations: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  antigravityBalanceConsent: z.object({
+    revision: z.number().int().nonnegative(),
+    consented: z.boolean(),
+    supported: z.boolean(),
+  }).default({ revision: 1, consented: false, supported: false }),
 });
 export type StoredState = z.infer<typeof StoredStateSchema>;
 
@@ -228,6 +233,7 @@ export function salvageState(raw: unknown): { state: StoredState; dropped: boole
       continuations: records(ContinuationChainSchema, source.continuations),
       antigravityContinuations: records(AntigravityContinuationSchema, source.antigravityContinuations),
       antigravityAccountGenerations: records(z.number().int().nonnegative(), source.antigravityAccountGenerations),
+      antigravityBalanceConsent: keep(StoredStateSchema.shape.antigravityBalanceConsent, source.antigravityBalanceConsent) ?? { revision: 1, consented: false, supported: false },
     },
     dropped: true,
   };

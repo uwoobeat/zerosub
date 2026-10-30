@@ -227,6 +227,35 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform === "win32")("Antigravity quota process", () => {
+  it("limits concurrent quota processes across identity and usage and drops invalid queued work", async () => {
+    cli.command = await writeCli(`setTimeout(() => { ${successSource()} }, 150);`);
+    const homes = await Promise.all(Array.from({ length: 4 }, () => tempDir("zerosub-quota-home-")));
+    await Promise.all(homes.map((home) => writeCredential(home, "synthetic-token")));
+    const actual = await vi.importActual<typeof import("./process")>("./process");
+    let running = 0;
+    let maximum = 0;
+    vi.mocked(run).mockImplementation(async (...args) => {
+      running += 1;
+      maximum = Math.max(maximum, running);
+      try { return await actual.run(...args); }
+      finally { running -= 1; }
+    });
+    const adapter = new AntigravityAdapter();
+    let valid = true;
+    const first = adapter.identity(homes[0]!);
+    const second = adapter.usage(homes[1]!);
+    await vi.waitFor(() => expect(running).toBe(2));
+    const third = adapter.usage(homes[2]!);
+    const fourth = adapter.usage(homes[3]!, { quotaContext: { key: "queued", valid: async () => valid } });
+    await vi.waitFor(() => expect(adapter["quotaWaiters"].length).toBe(2));
+    valid = false;
+    const results = await Promise.all([first, second, third, fourth]);
+    vi.mocked(run).mockImplementation(actual.run);
+    expect(maximum).toBe(2);
+    expect(results[3]).toMatchObject({ error: expect.any(String), windows: [] });
+    expect(vi.mocked(run)).toHaveBeenCalledTimes(3);
+  });
+
   it("runs the CLI and reads its group buckets", async () => {
     cli.command = await writeCli(successSource());
     const usage = await new AntigravityAdapter().usage(null);

@@ -8,6 +8,7 @@ import { FAMILY_LABEL, type AccountView, type Family, type StateView } from "../
 import { preferences } from "../shared/preferences";
 import {
   clearAccountLimit,
+  consentAntigravityBalance,
   removeAccount,
   renameAccount,
   setAccountEnabled,
@@ -144,7 +145,7 @@ export function AccountsSurface(props: PluginSurfaceProps & { store: ZeroSubStor
             ))
           : null}
 
-        <AutomationSettings theme={theme} state={state} />
+        <AutomationSettings theme={theme} state={state} store={store} />
       </ScrollView>
 
       {adding ? (
@@ -773,9 +774,10 @@ function Avatar({ theme, label }: { theme: Theme; label: string }) {
   );
 }
 
-function AutomationSettings({ theme, state }: { theme: Theme; state: StateView | null }) {
+function AutomationSettings({ theme, state, store }: { theme: Theme; state: StateView | null; store: ZeroSubStore }) {
   const settings = useSettings(preferences);
   const text = useText(theme);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   if (settings.status === "loading") return null;
   if (settings.status !== "ready") {
     return <Text style={text.danger}>Preferences unavailable: {settings.error}</Text>;
@@ -826,6 +828,28 @@ function AutomationSettings({ theme, state }: { theme: Theme; state: StateView |
           disabled={settings.saving}
           onValueChange={(balanceNewAgents) => save({ balanceNewAgents })}
         />
+        {antigravity ? <>
+          <SettingsSwitch
+            label="Start new Antigravity agents on the account with the most room"
+            hint={settings.values.antigravityBalanceNewAgents && state?.antigravityBalance?.consentRequired
+              ? "Support changed; turn this on again to consent. Experimental and limited to new Claude Opus 5.5 high agents."
+              : "Experimental: Claude Opus 5.5 high only. Uses the freshest shared group quota; missing quota falls back to the default. Applies only to new agents."}
+            value={Boolean(settings.values.antigravityBalanceNewAgents && state?.antigravityBalance && !state.antigravityBalance.consentRequired)}
+            disabled={settings.saving || !state?.antigravityBalance?.available || !supportsFamily(state, "antigravity", "balanceNewAgents")}
+            onValueChange={(enabled) => {
+              const revision = state?.antigravityBalance?.revision;
+              setBalanceError(null);
+              void (async () => {
+                if (!await settings.save({ ...settings.values, antigravityBalanceNewAgents: enabled }, settings.revision)) return;
+                if (enabled && revision !== undefined) {
+                  try { await store.rpc(consentAntigravityBalance, { revision }); }
+                  catch { setBalanceError("Could not confirm consent. Turn the setting on again when support is available."); }
+                }
+              })();
+            }}
+          />
+          {balanceError ? <Text style={text.danger}>{balanceError}</Text> : null}
+        </> : null}
         <SettingsSwitch
           label="Move open agents when the default changes"
           hint="Off: open agents stay on the account they're using, even after they reopen. New agents, and agents that aren't open at the time, use the new default."

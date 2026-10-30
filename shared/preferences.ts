@@ -29,6 +29,8 @@ export const preferences = defineSettings({
     moveAgentsOnDefaultChange: z.boolean().default(true),
     /** New agents start on the account with the most headroom instead of the default. */
     balanceNewAgents: z.boolean().default(false),
+    /** Experimental Antigravity first-session selection; consent is stored separately. */
+    antigravityBalanceNewAgents: z.boolean().default(false),
     /** When every account of a provider is at its limit, spend a banked reset instead of stopping. */
     autoRedeem: z.boolean().default(false),
     /**

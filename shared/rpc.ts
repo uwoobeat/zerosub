@@ -8,6 +8,12 @@ export const getState = defineRpc({
   output: StateViewSchema,
 });
 
+export const consentAntigravityBalance = defineRpc({
+  name: "zerosub.antigravity.balance.consent",
+  input: z.object({ revision: z.number().int().nonnegative() }),
+  output: z.object({ ok: z.literal(true) }),
+});
+
 export const startLogin = defineRpc({
   name: "zerosub.login.start",
   input: z.object({

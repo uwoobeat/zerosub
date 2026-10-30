@@ -1,7 +1,7 @@
 import type { Family, FamilyCapabilities, LoginMethod, StateView } from "../shared/model";
 
 /** Feature flags the UI must consult before offering an action. */
-export type FamilyFeature = "managedAccounts" | "autoSwitch" | "resets" | "fork";
+export type FamilyFeature = "managedAccounts" | "autoSwitch" | "balanceNewAgents" | "resets" | "fork";
 
 export function familyTitle(family: Family): string {
   if (family === "claude") return "Claude";
@@ -24,7 +24,7 @@ export function capabilityFor(state: StateView | null, family: Family): FamilyCa
 export function supportsFamily(state: StateView | null, family: Family, feature: FamilyFeature): boolean {
   const capabilities = capabilityFor(state, family);
   if (!capabilities) return family !== "antigravity";
-  return capabilities[feature];
+  return capabilities[feature] ?? family !== "antigravity";
 }
 
 /**

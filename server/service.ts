@@ -30,6 +30,7 @@ import {
   type LoginHandle,
   type RedeemReply,
   type UsageRead,
+  type QuotaContext,
 } from "./adapter";
 import { bringsOwnAuth, FamilyResolver } from "./families";
 import { AntigravityContinuations } from "./antigravity-continuations";
@@ -97,6 +98,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   continuePrompt: DEFAULT_CONTINUE_PROMPT,
   moveAgentsOnDefaultChange: true,
   balanceNewAgents: false,
+  antigravityBalanceNewAgents: false,
   showComposerPill: true,
   autoRedeem: false,
   forkOtherProvider: false,
@@ -124,6 +126,8 @@ interface AgentInfo {
   hasHistory: boolean;
   title: string | null;
   model: string | null;
+  nativeSession: boolean;
+  modelConflict: boolean;
   /** The agent this one carries on from, when ZeroSub started it as a continuation. */
   continuedFrom: string | null;
 }
@@ -157,7 +161,8 @@ export class Service {
   private prefs: Preferences = DEFAULT_PREFERENCES;
   private readonly usage = new Map<string, Usage>();
   private readonly usageAttemptAt = new Map<string, number>();
-  private readonly usageInFlight = new Map<string, Promise<void>>();
+  private readonly usageInFlight = new Map<string, { key: string; task: Promise<void> }>();
+  private readonly usageGeneration = new Map<string, string>();
   private readonly identityCheckedAt = new Map<string, number>();
   private readonly availability = new Map<Family, { ok: boolean; detail: string | null; at: number }>();
   private readonly familyChecks = new Map<Family, Promise<void>>();
@@ -169,6 +174,7 @@ export class Service {
   private readonly antigravityTurnRevisions = new Map<string, number>();
   private readonly antigravityReadings = new Map<string, { home: string | null; generation: number; usage: Usage }>();
   private readonly continuationLocks = new Map<string, Mutex>();
+  private readonly routeLocks = new Map<string, { mutex: Mutex; users: number }>();
   /** Agents whose account changed mid-turn; reopened when the turn ends. */
   private readonly deferred = new Map<string, SwitchRow | null>();
   /** Agents in the middle of a failover, so nothing else moves them at the same time. */
@@ -234,6 +240,44 @@ export class Service {
       ...prefs,
       antigravityAutoSwitch: this.adapters.antigravity?.capabilities?.autoSwitch ? prefs.antigravityAutoSwitch : false,
     };
+    if (!prefs.antigravityBalanceNewAgents) {
+      void this.store.update((draft) => {
+        if (!this.prefs.antigravityBalanceNewAgents) draft.antigravityBalanceConsent.consented = false;
+      }).catch((error: unknown) => log("could not clear Antigravity balance consent", error));
+    }
+  }
+
+  /** Persist support transitions independently of temporary provider or CLI availability. */
+  private async balanceSupport(): Promise<StoredState> {
+    const supported = this.adapters.antigravity?.capabilities?.balanceNewAgents === true;
+    let state = await this.store.read();
+    if (state.antigravityBalanceConsent.supported !== supported) {
+      state = await this.store.update((draft) => {
+        const consent = draft.antigravityBalanceConsent;
+        if (consent.supported !== supported) {
+          consent.supported = supported;
+          consent.consented = false;
+          consent.revision += 1;
+        }
+      });
+    }
+    return state;
+  }
+
+  async consentAntigravityBalance(revision: number): Promise<{ ok: true }> {
+    const state = await this.balanceSupport();
+    if (!state.antigravityBalanceConsent.supported || state.antigravityBalanceConsent.revision !== revision ||
+        !this.paseo || !Object.values(await this.families.resolve(this.paseo)).includes("antigravity") ||
+        !this.availability.get("antigravity")?.ok) throw new Error("Antigravity balance support changed or is unavailable.");
+    await this.store.update((draft) => {
+      const consent = draft.antigravityBalanceConsent;
+      if (!consent.supported || consent.revision !== revision || !this.adapters.antigravity?.capabilities?.balanceNewAgents) {
+        throw new Error("Antigravity balance support changed.");
+      }
+      consent.consented = true;
+    });
+    if (this.timer) void this.tick().catch(() => undefined);
+    return { ok: true };
   }
 
   /** Remember the plugin's SDK connection for background work (cleanup, failover). */
@@ -244,6 +288,7 @@ export class Service {
   }
 
   async start(): Promise<void> {
+    await this.balanceSupport();
     // The last readings show right away; fresh ones replace them as they arrive.
     for (const [accountId, reading] of await loadReadings()) if (!this.usage.has(accountId)) this.usage.set(accountId, reading);
     await Promise.all(this.supportedFamilies().map((family) => this.ensureFamily(family)));
@@ -281,10 +326,26 @@ export class Service {
     const availability = await adapter.available().catch((error: unknown) => ({ ok: false, detail: describe(error) }));
     this.availability.set(family, { ...availability, at: Date.now() });
     if (!availability.ok) return;
-    const identity = await adapter.identity(null).catch(() => null);
-    this.identityCheckedAt.set(MAIN_ACCOUNT_ID[family], Date.now());
-    await this.store.update((draft) => {
+    const before = await this.store.read();
+    const priorMain = findAccount(before, MAIN_ACCOUNT_ID[family]);
+    const priorGeneration = before.antigravityAccountGenerations[MAIN_ACCOUNT_ID[family]] ?? 0;
+    const bootstrapContext: QuotaContext | undefined = family === "antigravity" ? {
+      key: JSON.stringify([MAIN_ACCOUNT_ID[family], null, priorGeneration]),
+      valid: async () => {
+        const latest = await this.store.read();
+        const current = findAccount(latest, MAIN_ACCOUNT_ID[family]);
+        return Boolean((!priorMain ? !current : current?.home === priorMain.home) &&
+          (latest.antigravityAccountGenerations[MAIN_ACCOUNT_ID[family]] ?? 0) === priorGeneration &&
+          this.paseo && Object.values(await this.families.resolve(this.paseo)).includes(family));
+      },
+    } : undefined;
+    const identity = await adapter.identity(null, bootstrapContext).catch(() => null);
+    if (bootstrapContext && !await bootstrapContext.valid()) return;
+    let applied = false;
+    const updated = await this.store.update((draft) => {
       let main = findAccount(draft, MAIN_ACCOUNT_ID[family]);
+      if (family === "antigravity" && ((!priorMain && main) || (priorMain && (!main || main.home !== priorMain.home)) ||
+          (draft.antigravityAccountGenerations[MAIN_ACCOUNT_ID[family]] ?? 0) !== priorGeneration)) return;
       if (!main) {
         main = newAccount({ id: MAIN_ACCOUNT_ID[family], family, kind: "main", home: null });
         main.signedIn = false;
@@ -297,7 +358,17 @@ export class Service {
         applyIdentity(main, identity, draft);
       }
       if (!main.label) main.label = `${FAMILY_LABEL[family]} (CLI login)`;
+      applied = true;
     });
+    if (applied) {
+      const mainId = MAIN_ACCOUNT_ID[family];
+      if (family === "antigravity" && identity) {
+        const main = findAccount(updated, mainId);
+        if (main) this.resetUsageGeneration(mainId, this.quotaContext(main, updated.antigravityAccountGenerations[mainId] ?? 0).key);
+        this.usageAttemptAt.set(mainId, Date.now());
+      }
+      this.identityCheckedAt.set(mainId, Date.now());
+    }
   }
 
   private async tick(): Promise<void> {
@@ -314,8 +385,10 @@ export class Service {
       const attempted = this.usageAttemptAt.get(account.id) ?? 0;
       const busy = now - (this.activeAt.get(account.id) ?? 0) < ACTIVE_WINDOW_MS;
       const isDefault = defaultAccount(state, account.family)?.id === account.id;
-      const every = account.disabled ? USAGE_IDLE_MS : busy ? USAGE_BUSY_MS : isDefault ? USAGE_DEFAULT_MS : USAGE_IDLE_MS;
-      if (account.signedIn && now - attempted > every) {
+      const balancing = account.family === "antigravity" && this.prefs.antigravityBalanceNewAgents &&
+        state.antigravityBalanceConsent.supported && state.antigravityBalanceConsent.consented && !account.disabled;
+      const every = account.disabled ? USAGE_IDLE_MS : busy ? USAGE_BUSY_MS : isDefault || balancing ? USAGE_DEFAULT_MS : USAGE_IDLE_MS;
+      if (account.signedIn && now - attempted >= every) {
         void this.refreshUsage(account.id).catch((error: unknown) => log(`usage refresh for ${account.label} failed`, error));
       }
       if (now - (this.identityCheckedAt.get(account.id) ?? 0) > IDENTITY_MS) {
@@ -330,11 +403,13 @@ export class Service {
   }
 
   private async refreshIdentity(accountId: string): Promise<void> {
-    const sinceUsage = Date.now() - (this.usageAttemptAt.get(accountId) ?? 0);
     const state = await this.store.read();
     const account = findAccount(state, accountId);
     if (!account) return;
     const generation = state.antigravityAccountGenerations[accountId] ?? 0;
+    const quotaContext = account.family === "antigravity" ? this.quotaContext(account, generation) : undefined;
+    if (quotaContext) this.resetUsageGeneration(accountId, quotaContext.key);
+    const sinceUsage = Date.now() - (this.usageAttemptAt.get(accountId) ?? 0);
     const markAttempt = async () => {
       if (account.family !== "antigravity") return;
       const latest = await this.store.read();
@@ -349,7 +424,9 @@ export class Service {
     // Antigravity verifies identity via quota; its identity refresh must respect the same minimum
     // spacing as usage, even when an explicit refresh requests both at once.
     if (account.family === "antigravity" && sinceUsage < this.adapter(account.family).usageSpacingMs) { await markAttempt(); return; }
-    const identity = await this.adapter(account.family).identity(account.home).catch(() => null);
+    if (quotaContext && !await quotaContext.valid()) return;
+    if (quotaContext) this.usageAttemptAt.set(accountId, Date.now());
+    const identity = await this.adapter(account.family).identity(account.home, quotaContext).catch(() => null);
     if (!identity) { await markAttempt(); return; }
     let applied = false;
     await this.store.update((draft) => {
@@ -476,43 +553,74 @@ export class Service {
   async onSessionOpen(
     request: PluginSessionOpenRequest,
     context: PluginHookContext,
+    createModel: string | null = null,
   ): Promise<PluginSessionOpenRequest | undefined> {
-    const routed = this.route(request, context);
-    if (request.purpose !== "interactive") return routed;
+    if (request.purpose !== "interactive") return this.route(request, context, createModel);
+    let lock = this.routeLocks.get(request.agentId);
+    if (!lock) { lock = { mutex: new Mutex(), users: 0 }; this.routeLocks.set(request.agentId, lock); }
+    lock.users += 1;
+    const routed = lock.mutex.run(() => context.signal?.aborted ? Promise.resolve(undefined) : this.route(request, context, createModel));
     this.routing.set(routed, request.agentId);
     try {
       return await routed;
     } finally {
       this.routing.delete(routed);
+      lock.users -= 1;
+      if (lock.users === 0) this.routeLocks.delete(request.agentId);
     }
   }
 
   private async route(
     request: PluginSessionOpenRequest,
     context: PluginHookContext,
+    createModel: string | null,
+    retryBalance = true,
   ): Promise<PluginSessionOpenRequest | undefined> {
     this.attach(context.paseo);
     const family = (await this.families.resolve(context.paseo))[request.provider];
-    if (!family || !this.adapters[family]) return undefined;
+    if (context.signal?.aborted || !family || !this.adapters[family]) return undefined;
     if (family === "antigravity" && (bringsOwnAuth(family, request.env) || request.env.HOME)) {
       if (request.purpose === "interactive") {
-        await this.store.update((draft) => { delete draft.sessions[request.agentId]; });
+        await this.store.update((draft) => { if (!context.signal?.aborted) delete draft.sessions[request.agentId]; });
       }
       return undefined;
     }
     const adapter = this.adapter(family);
     // Model metadata is local Paseo state, never a quota/API query on the session hook.
-    const model = family === "antigravity" ? (await agentInfo(context.paseo, request.agentId))?.model ?? null : null;
+    const agent = family === "antigravity" ? await agentInfo(context.paseo, request.agentId) : null;
+    const model = family === "antigravity" ? agent?.model ?? createModel : null;
     this.agentModels.set(request.agentId, model);
     const now = Date.now();
-    const state = await this.store.read();
+    const state = family === "antigravity" ? await this.balanceSupport() : await this.store.read();
     const reserved = family === "antigravity" ? Object.values(state.antigravityContinuations)
       .find((chain) => chain.pending?.agentId === request.agentId && chain.members[request.agentId]?.unstarted)?.pending : undefined;
     const reservedAccount = reserved && state.bindings[request.agentId]?.accountId === reserved.accountId
       ? findAccount(state, reserved.accountId) : undefined;
     if (reserved && (!reservedAccount || reservedAccount.family !== "antigravity")) return undefined;
+    const existingSessionAccount = family === "antigravity" && state.sessions[request.agentId]?.family === family
+      ? findAccount(state, state.sessions[request.agentId]?.accountId) : undefined;
+    const canBalance = family === "antigravity" && request.reason === "create" && request.purpose === "interactive" &&
+      !reserved && !state.bindings[request.agentId] && !state.sessions[request.agentId] &&
+      this.prefs.antigravityBalanceNewAgents && state.antigravityBalanceConsent.supported && state.antigravityBalanceConsent.consented &&
+      this.availability.get("antigravity")?.ok && createModel === EXPERIMENTAL_LIMIT_MODEL &&
+      (!agent?.model || agent.model === createModel) && !agent?.modelConflict && !agent?.nativeSession && !agent?.continuedFrom;
+    const balanceCandidate = (current: StoredState) => {
+      const balanceState = { ...current, antigravityAccountGenerations: Object.fromEntries(current.accounts.map((entry) =>
+        [entry.id, current.antigravityAccountGenerations[entry.id] ?? 0])) };
+      return mostAvailableAntigravity(balanceState, createModel ?? "", (id) => {
+        const reading = this.antigravityReadings.get(id);
+        if (!reading) return null;
+        const usage = experimentalAntigravityBalanceUsage(createModel, reading.usage);
+        return usage ? { ...reading, usage, scopeId: EXPERIMENTAL_LIMIT_SCOPE, bucketIds: EXPERIMENTAL_LIMIT_BUCKETS } : null;
+      }, Date.now());
+    };
+    const balanced = canBalance ? balanceCandidate(state) : undefined;
     const decision = reservedAccount?.family === "antigravity"
       ? { account: reservedAccount, bind: null, skipped: null }
+      : existingSessionAccount?.family === "antigravity" && !state.bindings[request.agentId]
+      ? { account: existingSessionAccount, bind: null, skipped: null }
+      : balanced
+      ? { account: balanced, bind: { accountId: balanced.id, source: "balance" as const, at: new Date(now).toISOString() }, skipped: null }
       : chooseAccount(state, {
       agentId: request.agentId,
       family,
@@ -535,7 +643,7 @@ export class Service {
         // Never route Antigravity through a home whose isolation could not be verified.
         if (family === "antigravity") {
           if (request.purpose === "interactive") {
-            await this.store.update((draft) => { delete draft.sessions[request.agentId]; });
+            await this.store.update((draft) => { if (!context.signal?.aborted) delete draft.sessions[request.agentId]; });
           }
           return undefined;
         }
@@ -548,7 +656,7 @@ export class Service {
       if (family !== "antigravity") throw error;
       log(`could not verify the credentials of ${account.label}`, error);
       if (request.purpose === "interactive") {
-        await this.store.update((draft) => { delete draft.sessions[request.agentId]; });
+        await this.store.update((draft) => { if (!context.signal?.aborted) delete draft.sessions[request.agentId]; });
       }
       return undefined;
     }
@@ -561,8 +669,30 @@ export class Service {
       previousSession?.authGeneration !== (state.antigravityAccountGenerations[account.id] ?? 0) ||
       (previousSession?.authHome ?? null) !== account.home
     )));
+    if (decision.bind?.source === "balance" && family === "antigravity") {
+      const latestAgent = await agentInfo(context.paseo, request.agentId);
+      if (latestAgent && (latestAgent.nativeSession || latestAgent.modelConflict || latestAgent.continuedFrom ||
+          (latestAgent.model && latestAgent.model !== createModel))) return undefined;
+      if ((await this.families.resolve(context.paseo))[request.provider] !== family) return undefined;
+    }
+    if (context.signal?.aborted) return undefined;
+    let accepted = true;
     if (bindingChanged || sessionNeedsUpdate) {
       await this.store.update((draft) => {
+        const current = findAccount(draft, account.id);
+        if (context.signal?.aborted || (family === "antigravity" && (!current || current.home !== account.home ||
+            (decision.bind?.source === "balance" && (!current.signedIn || current.disabled)) ||
+            (draft.antigravityAccountGenerations[account.id] ?? 0) !== (state.antigravityAccountGenerations[account.id] ?? 0) ||
+            (decision.bind?.source === "balance" && (!this.prefs.antigravityBalanceNewAgents ||
+              !draft.antigravityBalanceConsent.consented || !draft.antigravityBalanceConsent.supported ||
+              draft.antigravityBalanceConsent.revision !== state.antigravityBalanceConsent.revision ||
+              !this.availability.get("antigravity")?.ok ||
+              draft.defaults.antigravity !== state.defaults.antigravity ||
+              balanceCandidate(draft)?.id !== account.id ||
+              draft.bindings[request.agentId] !== undefined || draft.sessions[request.agentId] !== undefined))))) {
+          accepted = false;
+          return;
+        }
         // Don't overwrite a choice the user made while this decision was being taken.
         if (decision.bind && bindingChanged && draft.bindings[request.agentId]?.accountId === seenBinding) {
           draft.bindings[request.agentId] = decision.bind;
@@ -577,6 +707,26 @@ export class Service {
           } : {}),
         };
       });
+    }
+    if (!accepted) {
+      if (!context.signal?.aborted && retryBalance && decision.bind?.source === "balance") return this.route(request, context, createModel, false);
+      return undefined;
+    }
+    if (context.signal?.aborted) {
+      if (bindingChanged || sessionNeedsUpdate) await this.store.update((draft) => {
+        const binding = draft.bindings[request.agentId];
+        if (decision.bind && binding?.accountId === decision.bind.accountId && binding.at === decision.bind.at && binding.source === decision.bind.source) {
+          const previousBinding = state.bindings[request.agentId];
+          if (previousBinding) draft.bindings[request.agentId] = previousBinding;
+          else delete draft.bindings[request.agentId];
+        }
+        const session = draft.sessions[request.agentId];
+        if (session?.accountId === account.id && session.openedAt === new Date(now).toISOString()) {
+          if (previousSession) draft.sessions[request.agentId] = previousSession;
+          else delete draft.sessions[request.agentId];
+        }
+      });
+      return undefined;
     }
     // A fresh session already runs on the routed account, so any pending switch is done.
     if (interactive) this.deferred.delete(request.agentId);
@@ -1650,25 +1800,50 @@ export class Service {
       Object.values(await this.families.resolve(this.paseo)).includes("antigravity"));
   }
 
+  private quotaContext(account: StoredAccount, generation: number): QuotaContext {
+    return {
+      key: JSON.stringify([account.id, account.home, generation]),
+      valid: async () => {
+        const state = await this.store.read();
+        const current = findAccount(state, account.id);
+        return Boolean(current && current.family === "antigravity" && current.home === account.home &&
+          (state.antigravityAccountGenerations[account.id] ?? 0) === generation && await this.canReadAccount(current));
+      },
+    };
+  }
+
+  private resetUsageGeneration(accountId: string, key: string): void {
+    if (this.usageGeneration.get(accountId) === key) return;
+    this.usageGeneration.set(accountId, key);
+    this.usageAttemptAt.delete(accountId);
+    this.usageRetryAt.delete(accountId);
+    this.identityCheckedAt.delete(accountId);
+    this.antigravityReadings.delete(accountId);
+  }
+
   /** `renewLogin` lets the CLI refresh an expired sign-in first (explicit refreshes only: it's slow). */
-  refreshUsage(accountId: string, force = false, renewLogin = false): Promise<void> {
+  async refreshUsage(accountId: string, force = false, renewLogin = false): Promise<void> {
+    const initialState = await this.store.read();
+    const account = findAccount(initialState, accountId);
+    if (!account) return;
+    const generation = initialState.antigravityAccountGenerations[accountId] ?? 0;
+    const quotaContext = account.family === "antigravity" ? this.quotaContext(account, generation) : undefined;
+    const key = quotaContext?.key ?? accountId;
     const pending = this.usageInFlight.get(accountId);
-    if (pending) return pending;
+    if (pending?.key === key) return pending.task;
+    if (quotaContext) this.resetUsageGeneration(accountId, key);
     const now = Date.now();
     // The provider asked us to wait; asking sooner would only be refused again.
-    if (now < (this.usageRetryAt.get(accountId) ?? 0)) return Promise.resolve();
+    if (now < (this.usageRetryAt.get(accountId) ?? 0)) return;
     const since = now - (this.usageAttemptAt.get(accountId) ?? 0);
     const task = (async () => {
-      const initialState = await this.store.read();
-      const account = findAccount(initialState, accountId);
-      if (!account) return;
-      const generation = initialState.antigravityAccountGenerations[accountId] ?? 0;
       if (!(await this.canReadAccount(account))) return;
+      if (quotaContext && !await quotaContext.valid()) return;
       const spacing = this.adapter(account.family).usageSpacingMs;
       if (since < (force ? spacing : Math.max(spacing, 60_000))) return;
       this.usageAttemptAt.set(accountId, Date.now());
       const { retryAt, ...usage } = await this.adapter(account.family)
-        .usage(account.home, { renewLogin })
+        .usage(account.home, { renewLogin, ...(quotaContext ? { quotaContext } : {}) })
         .catch(
           (error: unknown): UsageRead => ({ fetchedAt: new Date().toISOString(), windows: [], error: describe(error), cached: false, resets: null }),
         );
@@ -1710,8 +1885,8 @@ export class Service {
           target.limitKind = null;
         });
       }
-    })().finally(() => this.usageInFlight.delete(accountId));
-    this.usageInFlight.set(accountId, task);
+    })().finally(() => { if (this.usageInFlight.get(accountId)?.task === task) this.usageInFlight.delete(accountId); });
+    this.usageInFlight.set(accountId, { key, task });
     return task;
   }
 
@@ -1779,7 +1954,7 @@ export class Service {
       ]));
     }
     void this.prune(paseo).catch(() => undefined);
-    const state = await this.store.read();
+    const state = await this.balanceSupport();
     const families = await this.families.resolve(paseo);
     const agents = await this.cachedAgents(paseo);
     const now = Date.now();
@@ -1837,6 +2012,12 @@ export class Service {
           ? { managedAccounts: false, loginMethods: [], autoSwitch: false, resets: false, fork: false }
           : supported];
       })),
+      antigravityBalance: {
+        supported: state.antigravityBalanceConsent.supported,
+        available: state.antigravityBalanceConsent.supported && Boolean(this.availability.get("antigravity")?.ok) && Object.values(families).includes("antigravity"),
+        consentRequired: !state.antigravityBalanceConsent.consented,
+        revision: state.antigravityBalanceConsent.revision,
+      },
       canReopen: (await this.reopener.locate()) !== null,
       browserSignIn: this.browserSignIn,
       showComposerPill: this.prefs.showComposerPill,
@@ -2148,6 +2329,7 @@ export class Service {
       .map(([agentId]) => agentId);
     await this.store.update((draft) => {
       draft.accounts = draft.accounts.filter((entry) => entry.id !== accountId);
+      if (account.family === "antigravity") draft.antigravityAccountGenerations[accountId] = (draft.antigravityAccountGenerations[accountId] ?? 0) + 1;
       for (const [agentId, binding] of Object.entries(draft.bindings)) {
         if (binding.accountId !== accountId) continue;
         const actual = draft.sessions[agentId]?.accountId;
@@ -2158,6 +2340,8 @@ export class Service {
       if (draft.defaults[account.family] === accountId) draft.defaults[account.family] = null;
     });
     this.setUsage(accountId, null);
+    this.antigravityReadings.delete(accountId);
+    this.usageGeneration.delete(accountId);
     // Idle agents move now and busy ones after their turn. The home is signed out and deleted by the
     // cleanup pass only once nothing runs on it any more.
     await this.reconcile(paseo, "removed", affected, new Map([[account.id, account.label]]));
@@ -2404,6 +2588,8 @@ function toAgentInfo(agent: AgentSnapshot): AgentInfo {
     title: agent.title ?? null,
     continuedFrom: agent.labels?.[CONTINUED_FROM_LABEL] ?? null,
     model: agent.model ?? agent.runtimeInfo?.model ?? null,
+    nativeSession: Boolean(agent.runtimeInfo?.sessionId),
+    modelConflict: Boolean(agent.model && agent.runtimeInfo?.model && agent.model !== agent.runtimeInfo.model),
   };
 }
 

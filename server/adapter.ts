@@ -32,6 +32,7 @@ export type LimitKind = "window" | "budget";
 
 /** A usage reading, plus when to ask again if the provider said to slow down. */
 export type UsageRead = Usage & { retryAt?: number };
+export type QuotaContext = { key: string; valid(): Promise<boolean> };
 
 export interface LimitHit {
   kind: LimitKind;
@@ -92,12 +93,12 @@ export interface FamilyAdapter {
   prepareHome(home: string): Promise<void>;
   /** `home === null` is the CLI's own login. */
   env(home: string | null): Promise<EnvPatch>;
-  identity(home: string | null): Promise<Identity>;
+  identity(home: string | null, context?: QuotaContext): Promise<Identity>;
   /**
    * Usage windows and banked resets. `renewLogin` lets the adapter have the CLI refresh an expired
    * sign-in first (slow, so only for explicit requests, never background polls).
    */
-  usage(home: string | null, options?: { renewLogin?: boolean }): Promise<UsageRead>;
+  usage(home: string | null, options?: { renewLogin?: boolean; quotaContext?: QuotaContext }): Promise<UsageRead>;
   /** Spends one banked reset. Only called for an explicit user request or the opt-in auto setting. */
   /**
    * Spends one banked reset. With `onlyAtLimit` (automatic use) it spends one only while the
