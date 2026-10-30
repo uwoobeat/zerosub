@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DEFAULT_CONTINUE_PROMPT, preferences } from "./preferences";
+import {
+  AUTO_SWITCH_SETTINGS_MODE,
+  DEFAULT_CONTINUE_PROMPT,
+  normalizeAutoSwitchPreferences,
+  preferences,
+} from "./preferences";
 
 // The preferences 1.2.1 and 1.2.2 shipped, before "Move open agents when the default changes".
 const shipped = z.object({
@@ -35,5 +40,26 @@ describe("preferences", () => {
     expect(saved.autoContinue).toBe(true);
     expect(saved.forkOtherProvider).toBe(false);
     expect(shipped.safeParse(saved)).toMatchObject({ success: true });
+  });
+
+  it.each([
+    [true, true, true],
+    [true, false, false],
+    [false, true, false],
+    [false, false, false],
+  ])("preserves the former Antigravity gate for legacy settings (%s, %s)", (autoSwitch, antigravityAutoSwitch, expected) => {
+    const saved = normalizeAutoSwitchPreferences(preferences.schema.parse({ autoSwitch, antigravityAutoSwitch }));
+    expect(saved.antigravityAutoSwitch).toBe(expected);
+    expect(saved.autoSwitchSettingsMode).toBe(AUTO_SWITCH_SETTINGS_MODE);
+  });
+
+  it("keeps independently selected Antigravity switching on for marked settings", () => {
+    const saved = normalizeAutoSwitchPreferences(preferences.schema.parse({
+      autoSwitch: false,
+      antigravityAutoSwitch: true,
+      autoSwitchSettingsMode: AUTO_SWITCH_SETTINGS_MODE,
+    }));
+    expect(saved.autoSwitch).toBe(false);
+    expect(saved.antigravityAutoSwitch).toBe(true);
   });
 });

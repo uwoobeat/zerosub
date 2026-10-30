@@ -54,8 +54,9 @@ RPC·view model·설정·타임라인은 Zod 기반 공유 계약이다. 독립 
 사용 가능한 계정 선택 → Claude 재오픈 또는 Codex/Antigravity continuation.
 Paseo 0.13의 빈 hook timeline은 시간 제한 안에서 해당 턴의 행만 다시 읽어 한도를 판단한다.
 Codex continuation은 작업·계정별 탭을 재사용하고 아직 전달되지 않은 대화만 넘긴다.
-Antigravity는 별도 작업 체인에서 수동 계정 전환만 처리하며, 계정 인증 세대와 provider/model/
-mode/thinking/features가 같은 탭을 재사용하고 Paseo timeline의 검증된 `epoch/seq` 증분을 인계한다.
+Antigravity는 별도 작업 체인에서 수동 전환과 조건을 충족한 실험적 자동 인계를 처리한다.
+계정 인증 세대와 provider/model/mode/thinking/features가 같은 탭을 재사용하고 Paseo timeline의
+검증된 `epoch/seq` 증분을 인계한다.
 SDK가 요청한 canonical projection을 보장하지 않으므로 cursor를 가로지르는 projected 항목은 거부한다.
 Codex와 Antigravity 체인을 서로 등록하지 않는다. 대상 탭의 기준 이력이 사라진 경우에만
 다른 멤버의 검증된 전체 이력에서 재구성한다. 필요한 멤버 timeline을 읽지 못하거나 epoch가
@@ -96,10 +97,12 @@ Service·UI의 제공자 목록, 로그인 방식, portability, 권한 대응, �
 확인한다. 모든 제공자를 재검사하는 `listAvailable()`은 다른 CLI의 응답을 기다릴 수 있어
 세션 시작·화면 표시의 확인 경로에 사용하지 않는다. 카탈로그 IPC의 1.5초 제한은 유지한다.
 제공자별 실제 지원 기능은 `FamilyAdapter.capabilities`에서 `StateView.capabilities`로 전달하며
-UI와 Service 양쪽에서 검사한다. Antigravity 자동 전환은 별도 opt-in이 기본적으로 꺼진
-실험 기능이며 실측에 기반한 단일 모델·그룹만 지원한다. 계정 간 이력 이동 대신 continuation을
-사용한다. reset·다른 제공자로 fork는 비활성이며 일반 설정만으로 AGY 자동 동작이 켜지지 않는다.
-신규 에이전트 선택도 별도 opt-in과 영속 동의가 필요하다. `agent.create`에서 발급한 일회용
+UI와 Service 양쪽에서 검사한다. Claude·ChatGPT 자동 전환은 `autoSwitch`, Antigravity 자동
+전환은 별도의 기본 off 설정으로 각각 제어한다. 과거 `autoSwitch`에 종속된 설정은 내부 호환
+표식이 생기기 전까지 이전 유효 동작을 유지한다. Antigravity는 실험 기능이며 지원 조건과 모델·그룹
+매핑이 확인된 경우만 처리하고, 계정 간 이력 이동 대신 continuation을 사용한다. reset·다른
+제공자로 fork는 비활성이며 Antigravity 신규 에이전트 분산은 별도 opt-in과 영속 동의가 필요하다.
+`agent.create`에서 발급한 일회용
 문맥으로 첫 session hook에 명시 모델을 전달하며 신선한 인증 세대별 quota만 비교한다.
 후속 hook에서 모델이 바뀌는지 전부 관측할 수 없다는 제약이 있다.
 

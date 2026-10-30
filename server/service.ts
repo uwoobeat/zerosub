@@ -16,7 +16,7 @@ import {
   type StateView,
   type Usage,
 } from "../shared/model";
-import { DEFAULT_CONTINUE_PROMPT, type Preferences } from "../shared/preferences";
+import { DEFAULT_CONTINUE_PROMPT, normalizeAutoSwitchPreferences, type Preferences } from "../shared/preferences";
 import type { RedeemResult, ReopenSummary } from "../shared/rpc";
 import { SWITCH_ROW_KIND, SWITCH_ROW_VERSION, type SwitchRow } from "../shared/timeline";
 import {
@@ -92,7 +92,7 @@ const ROUTING_WAIT_MS = 5_000;
 /** How long the end of a turn waits for Paseo to page the agent's timeline. The SDK itself waits 60 s. */
 const TURN_READ_MS = 10_000;
 
-const DEFAULT_PREFERENCES: Preferences = {
+const DEFAULT_PREFERENCES: Preferences = normalizeAutoSwitchPreferences({
   autoSwitch: true,
   autoContinue: true,
   continuePrompt: DEFAULT_CONTINUE_PROMPT,
@@ -103,7 +103,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   autoRedeem: false,
   forkOtherProvider: false,
   antigravityAutoSwitch: false,
-};
+});
 
 interface LoginSession {
   id: string;
@@ -231,11 +231,12 @@ export class Service {
   }
 
   private autoSwitchFor(family: Family): boolean {
-    return this.prefs.autoSwitch && this.capabilities(family).autoSwitch &&
-      (family !== "antigravity" || this.prefs.antigravityAutoSwitch);
+    return this.capabilities(family).autoSwitch &&
+      (family === "antigravity" ? this.prefs.antigravityAutoSwitch : this.prefs.autoSwitch);
   }
 
-  setPreferences(prefs: Preferences): void {
+  setPreferences(input: Preferences): void {
+    const prefs = normalizeAutoSwitchPreferences(input);
     this.prefs = {
       ...prefs,
       antigravityAutoSwitch: this.adapters.antigravity?.capabilities?.autoSwitch ? prefs.antigravityAutoSwitch : false,

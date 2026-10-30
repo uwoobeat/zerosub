@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { accountSubtitle, formatAge, formatPlan, usageSummary } from "../shared/format";
 import { FAMILY_LABEL, type AccountView, type Family, type StateView } from "../shared/model";
-import { preferences } from "../shared/preferences";
+import { normalizeAutoSwitchPreferences, preferences } from "../shared/preferences";
 import {
   clearAccountLimit,
   consentAntigravityBalance,
@@ -780,8 +780,9 @@ function AutomationSettings({ theme, state, store }: { theme: Theme; state: Stat
   }
   const antigravity = familyAvailable(state, "antigravity");
   const antigravitySwitch = supportsFamily(state, "antigravity", "autoSwitch");
+  const values = normalizeAutoSwitchPreferences(settings.values);
   const save = (patch: Partial<typeof settings.values>) => {
-    const next = normalizeAntigravityAutoSwitch({ ...settings.values, ...patch }, antigravitySwitch);
+    const next = normalizeAntigravityAutoSwitch({ ...values, ...patch }, antigravitySwitch);
     void settings.save(next, settings.revision);
   };
   return (
@@ -791,17 +792,17 @@ function AutomationSettings({ theme, state, store }: { theme: Theme; state: Stat
       </Text>
       <SettingsCard>
         <SettingsSwitch
-          label="Switch accounts when one hits its limit"
-          hint="Claude and ChatGPT agents move to the account with the most room left."
-          value={settings.values.autoSwitch}
+          label="Switch Claude and ChatGPT accounts automatically when one hits its limit"
+          hint="Controls automatic account switching for Claude and ChatGPT (Codex)."
+          value={values.autoSwitch}
           disabled={settings.saving}
           onValueChange={(autoSwitch) => save({ autoSwitch })}
         />
         <SettingsSwitch
-          label="Keep going after a switch"
-          hint="Sends a short follow-up so the interrupted task continues."
-          value={settings.values.autoContinue}
-          disabled={settings.saving || !settings.values.autoSwitch}
+          label="Continue after a switch or reset"
+          hint="Controls whether supported account switches and resets send a follow-up to continue the task."
+          value={values.autoContinue}
+          disabled={settings.saving}
           onValueChange={(autoContinue) => save({ autoContinue })}
         />
         {antigravity ? (
@@ -809,34 +810,38 @@ function AutomationSettings({ theme, state, store }: { theme: Theme; state: Stat
             label="Switch Antigravity accounts automatically"
             hint={
               antigravitySwitch
-                ? "Off by default. Also requires the main automatic switching setting above."
+                ? "Independent of Claude and ChatGPT switching. Off by default; only supported Antigravity limit events trigger a handoff."
                 : "Off and unavailable on this host until Antigravity account switching is supported and verified."
             }
-            value={antigravitySwitch ? settings.values.antigravityAutoSwitch : false}
-            disabled={settings.saving || !antigravitySwitch || !settings.values.autoSwitch}
+            value={antigravitySwitch ? values.antigravityAutoSwitch : false}
+            disabled={settings.saving || !antigravitySwitch}
             onValueChange={(antigravityAutoSwitch) => save({ antigravityAutoSwitch })}
           />
         ) : null}
         <SettingsSwitch
           label="Spread new agents across accounts"
           hint="New Claude and ChatGPT agents start on the account with the most room instead of the default."
-          value={settings.values.balanceNewAgents}
+          value={values.balanceNewAgents}
           disabled={settings.saving}
           onValueChange={(balanceNewAgents) => save({ balanceNewAgents })}
         />
         {antigravity ? <>
           <SettingsSwitch
             label="Start new Antigravity agents on the account with the most room"
-            hint={settings.values.antigravityBalanceNewAgents && state?.antigravityBalance?.consentRequired
+            hint={values.antigravityBalanceNewAgents && state?.antigravityBalance?.consentRequired
               ? "Support changed; turn this on again to consent. Experimental and applies only to new agents."
-              : "Experimental: Gemini, Claude and GPT models use their shared group quota; missing quota falls back to the default. Applies only to new agents."}
-            value={Boolean(settings.values.antigravityBalanceNewAgents && state?.antigravityBalance && !state.antigravityBalance.consentRequired)}
+              : "Experimental: Gemini models use the Gemini group, and Claude/GPT models use their shared group quota; missing quota falls back to the default. Applies only to new agents."}
+            value={Boolean(values.antigravityBalanceNewAgents && state?.antigravityBalance && !state.antigravityBalance.consentRequired)}
             disabled={settings.saving || !state?.antigravityBalance?.available || !supportsFamily(state, "antigravity", "balanceNewAgents")}
             onValueChange={(enabled) => {
               const revision = state?.antigravityBalance?.revision;
               setBalanceError(null);
               void (async () => {
-                if (!await settings.save({ ...settings.values, antigravityBalanceNewAgents: enabled }, settings.revision)) return;
+                const next = normalizeAntigravityAutoSwitch({
+                  ...values,
+                  antigravityBalanceNewAgents: enabled,
+                }, antigravitySwitch);
+                if (!await settings.save(next, settings.revision)) return;
                 if (enabled && revision !== undefined) {
                   try { await store.rpc(consentAntigravityBalance, { revision }); }
                   catch { setBalanceError("Could not confirm consent. Turn the setting on again when support is available."); }
@@ -849,22 +854,22 @@ function AutomationSettings({ theme, state, store }: { theme: Theme; state: Stat
         <SettingsSwitch
           label="Move open agents when the default changes"
           hint="Off: open agents stay on the account they're using, even after they reopen. New agents, and agents that aren't open at the time, use the new default."
-          value={settings.values.moveAgentsOnDefaultChange}
+          value={values.moveAgentsOnDefaultChange}
           disabled={settings.saving}
           onValueChange={(moveAgentsOnDefaultChange) => save({ moveAgentsOnDefaultChange })}
         />
         <SettingsSwitch
           label="Use banked resets when every account is out"
           hint="Spends one of the account's banked resets instead of stopping. Resets are scarce, so this is off unless you turn it on."
-          value={settings.values.autoRedeem}
-          disabled={settings.saving || !settings.values.autoSwitch}
+          value={values.autoRedeem}
+          disabled={settings.saving || !values.autoSwitch}
           onValueChange={(autoRedeem) => save({ autoRedeem })}
         />
         <SettingsSwitch
           label="When every account is out, fork the chat to the other provider"
           hint="A stopped Claude chat carries on in a new ChatGPT agent, or the other way round, with the conversation so far. The new agent gets no more permissions than the original; the original stays as it was."
-          value={settings.values.forkOtherProvider}
-          disabled={settings.saving || !settings.values.autoSwitch}
+          value={values.forkOtherProvider}
+          disabled={settings.saving || !values.autoSwitch}
           onValueChange={(forkOtherProvider) => save({ forkOtherProvider })}
         />
       </SettingsCard>

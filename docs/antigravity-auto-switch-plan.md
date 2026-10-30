@@ -258,14 +258,18 @@ Paseo 0.14.0의 정적 전달 경로와 실측 오류를 바탕으로 구현·�
 
 ## 5. 설정·UI·저장 호환성
 
-- 활성 조건은 `autoSwitch && antigravityAutoSwitch && capabilities.autoSwitch`를 유지한다.
-  `antigravityAutoSwitch`는 기본값 false이며, 누락된 과거 설정도 false다. 지원 capability는
-  초기 실험 범위의 native 경로에서 켜고, 미지원 호스트·모델은 실제 자동 동작에서 제외한다.
+- 새 설정에서 Claude·ChatGPT 자동 전환은 `autoSwitch && capabilities.autoSwitch`,
+  Antigravity 자동 전환은 `antigravityAutoSwitch && capabilities.autoSwitch`로 각각 판단한다.
+  `antigravityAutoSwitch`는 기본값 false다. 미지원 호스트·모델과 검증 조건을 충족하지 못한
+  실패는 실제 자동 동작에서 제외한다.
+- 저장 버전은 1을 유지한다. `autoSwitchSettingsMode: "provider-independent-v1"` 표식이 없는
+  과거 설정은 이전 유효 동작을 보존하기 위해 `autoSwitch && antigravityAutoSwitch`로 한 번
+  정규화한다. 이후 새 UI 저장에는 표식이 포함되어 두 설정을 독립적으로 바꿀 수 있다.
 - [Accounts](../client/accounts-surface.tsx)와 [설정 화면](../client/settings-screen.tsx)의
-  양쪽 스위치를 확인한다. 전역 스위치가 꺼졌거나 지원 근거가 없을 때의 표시를 맞추고,
-  일반 설정 또는 업그레이드만으로 AGY opt-in이 false에서 true로 바뀌지 않게 한다.
-- `balanceNewAgents`와 AGY 자동 failover의 연결을 끊는다. 이번 구현에서 AGY 신규 분산은
-  계속 비활성이며, 기존 Claude/Codex 분산 설정을 변경하지 않는다.
+  양쪽 화면에서 두 전환 스위치를 각각 편집할 수 있다. capability가 없는 호스트에서는
+  Antigravity 스위치를 끄고 편집할 수 없게 하며, `autoContinue`는 제공자 간 공유 설정으로 둔다.
+- `balanceNewAgents`와 Antigravity 자동 failover는 별도 기능이다. Antigravity 신규 분산은
+  기존의 별도 opt-in·동의 경로를 유지하고, Claude/Codex 분산 설정에는 영향을 주지 않는다.
 - 타임라인에는 적용 scope·실제 출발 계정·대상 계정·재사용/생성한 작업 탭과 중단 이유를
   표시한다. `continued`, `stayed`, `pending`을 성공 하나로 합치지 않는다. 후보 미확인,
   해당 그룹 소진, 작업 busy, 사용자 설정 중지, 전달 불명확을 구분한다. AGY에 지원하지 않는

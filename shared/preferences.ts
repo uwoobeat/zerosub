@@ -5,19 +5,24 @@ import { z } from "zod";
 export const DEFAULT_CONTINUE_PROMPT =
   "You were interrupted by a usage limit; that has been sorted out. Continue exactly where you left off.";
 
+/** Distinguishes independent provider switches from older settings where Antigravity was gated by autoSwitch. */
+export const AUTO_SWITCH_SETTINGS_MODE = "provider-independent-v1" as const;
+
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
   version: 1,
   schema: z.object({
-    /** Move an agent to another account of the same provider when its account hits a usage limit. */
+    /** Automatically switch Claude and ChatGPT agents to another account when their account hits a limit. */
     autoSwitch: z.boolean().default(true),
     /**
-     * Move Antigravity agents between accounts automatically. Off by default: account isolation on
-     * this provider has only been verified with the same account so far, so routing stays opt-in.
+     * Independently switch Antigravity agents to another account when their account hits a limit.
+     * Off by default and only active when the host reports automatic switching support.
      */
     antigravityAutoSwitch: z.boolean().default(false),
-    /** After an automatic switch, send a follow-up so the interrupted turn keeps going. */
+    /** Internal compatibility marker; absent settings retain the former shared master-switch meaning. */
+    autoSwitchSettingsMode: z.literal(AUTO_SWITCH_SETTINGS_MODE).optional(),
+    /** After a supported account switch or reset, send a follow-up so the interrupted task keeps going. */
     autoContinue: z.boolean().default(true),
     continuePrompt: z.string().trim().min(1).max(500).default(DEFAULT_CONTINUE_PROMPT),
     /**
@@ -44,3 +49,13 @@ export const preferences = defineSettings({
 });
 
 export type Preferences = z.output<typeof preferences.schema>;
+
+/** Preserve the old effective AGY state once, then let the two provider switches vary independently. */
+export function normalizeAutoSwitchPreferences(values: Preferences): Preferences {
+  if (values.autoSwitchSettingsMode === AUTO_SWITCH_SETTINGS_MODE) return values;
+  return {
+    ...values,
+    antigravityAutoSwitch: values.autoSwitch && values.antigravityAutoSwitch,
+    autoSwitchSettingsMode: AUTO_SWITCH_SETTINGS_MODE,
+  };
+}

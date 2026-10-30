@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Usage, UsageWindow } from "../shared/model";
-import { preferences } from "../shared/preferences";
+import { AUTO_SWITCH_SETTINGS_MODE, preferences } from "../shared/preferences";
 import type { EnvPatch, FamilyAdapter } from "./adapter";
 import { parseAntigravityUsage } from "./antigravity";
 import { CreateContexts, CREATE_CONTEXT_ENV } from "./create-context";
@@ -507,7 +507,7 @@ describe("Antigravity service integration", () => {
     await expect(service.forkAgent(paseo as never, AGENT)).rejects.toThrow(/doesn't support/);
   });
 
-  it("keeps automatic switching off despite the global preference and an opt-in flag", async () => {
+  it("keeps automatic switching off when the host lacks the capability", async () => {
     const { adapter, service, store, open, paseo, created, reopened } = await setup();
     service.setPreferences(preferences.schema.parse({ antigravityAutoSwitch: true, autoSwitch: true }));
     adapter.detectLimit = () => ({ kind: "window", resetsAt: new Date(Date.now() + 60_000).toISOString(), message: "official limit", scopeId: "third-party" });
@@ -519,10 +519,28 @@ describe("Antigravity service integration", () => {
     expect(reopened).not.toHaveBeenCalled();
   });
 
+  it("preserves the former shared switch for settings without the compatibility marker", async () => {
+    const { service } = await setup(true);
+    service.setPreferences(preferences.schema.parse({ autoSwitch: false, antigravityAutoSwitch: true }));
+    expect(service["autoSwitchFor"]("antigravity")).toBe(false);
+
+    service.setPreferences(preferences.schema.parse({
+      autoSwitch: false,
+      antigravityAutoSwitch: true,
+      autoSwitchSettingsMode: AUTO_SWITCH_SETTINGS_MODE,
+    }));
+    expect(service["autoSwitchFor"]("antigravity")).toBe(true);
+  });
+
   it("automatically hands off a matched failed turn to a fresh eligible account", async () => {
     const { service, agent, usage, open, paseo, created, sent, store } = await setup(true);
     agent.model = "claude-opus-5-5-high";
-    service.setPreferences(preferences.schema.parse({ antigravityAutoSwitch: true, autoSwitch: true, autoContinue: true }));
+    service.setPreferences(preferences.schema.parse({
+      antigravityAutoSwitch: true,
+      autoSwitch: false,
+      autoSwitchSettingsMode: AUTO_SWITCH_SETTINGS_MODE,
+      autoContinue: true,
+    }));
     usage.mockImplementation(async (home) => {
       const remaining = home === stored(A).home ? 0 : home === stored(B).home ? 0.9 : 0.2;
       return parseAntigravityUsage({ status: "SUCCESS", num_turns: 0, command: { name: "usage", data: { groups: [
@@ -542,6 +560,38 @@ describe("Antigravity service integration", () => {
     expect((await store.read()).sessions[AGENT]?.accountId).toBe(A);
     await service.onTurnEnded(event, { paseo } as never);
     expect(sent).toHaveLength(1);
+  });
+
+  it("routes a new session away from a limited default when only Antigravity switching is enabled", async () => {
+    const { service, store, open } = await setup(true);
+    service.setPreferences(preferences.schema.parse({
+      autoSwitch: false,
+      antigravityAutoSwitch: true,
+      autoSwitchSettingsMode: AUTO_SWITCH_SETTINGS_MODE,
+    }));
+    await store.update((draft) => {
+      draft.accounts.find((account) => account.id === A)!.limitedUntil = new Date(Date.now() + 60_000).toISOString();
+    });
+
+    const request = await open();
+    const state = await store.read();
+
+    expect(state.sessions[AGENT]?.accountId).not.toBe(A);
+    expect(state.bindings[AGENT]).toMatchObject({ source: "thread" });
+    expect(request?.env.HOME).not.toBe(stored(A).home);
+  });
+
+  it("does not balance a healthy Antigravity default just because switching is enabled", async () => {
+    const { service, store, open } = await setup(true);
+    service.setPreferences(preferences.schema.parse({
+      autoSwitch: false,
+      antigravityAutoSwitch: true,
+      autoSwitchSettingsMode: AUTO_SWITCH_SETTINGS_MODE,
+    }));
+
+    await open();
+
+    expect((await store.read()).sessions[AGENT]?.accountId).toBe(A);
   });
 
   it("does not use a failure without a matching started turn", async () => {
